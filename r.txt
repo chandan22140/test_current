@@ -1,0 +1,12 @@
+torch
+torchvision
+bitsandbytes
+datasets
+transformers
+timm
+wandb
+scikit-learn
+matplotlib
+seaborn
+vllm
+

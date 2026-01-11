@@ -1,0 +1,15 @@
+# Python bytecode
+__pycache__/
+
+# Data and Cache
+data_cache/
+
+# Training outputs and results
+outputs/
+results/
+
+# Snapshots or checkpoints
+snapshot/
+
+# Weights & Biases logs
+wandb/

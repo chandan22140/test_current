@@ -167,9 +167,9 @@ class RotationalPiSSAConfig:
     # Rotation parameterization method
     method: Literal["way0", "way1", "way2", "way3"] = "way0"
     
-    # Way 0 specific parameters (Direct optimization with regularization)
-    orthogonality_reg_weight: float = 1e-3      # Weight for orthogonality regularization
-    regularization_type: Literal["frobenius", "determinant", "log_determinant"] = "frobenius"  # Type of regularization
+    # Way 0 specific parameters (Direct orthogonality regularization)
+    orthogonality_reg_weight: float = 1e-4      # Weight for orthogonality regularization loss (frobenius only)
+    regularization_type: str = "frobenius"    # frobenius (recommended - fast), determinant, log_determinant
     
     # Way 1 specific parameters (Sequential Givens rotations)
     n_givens_layers: Optional[int] = None        # Number of Givens layers (default: r-1)
@@ -811,13 +811,21 @@ class RotationalLinearLayer(nn.Module):
         V_current = dequantize_params4bit(self.V) if hasattr(self.V, 'quant_state') else self.V
         
         # Ensure all components are in same dtype as input for matmul compatibility
+        # Only convert if dtype differs to avoid unnecessary overhead
         target_dtype = x.dtype
-        U_current = U_current.to(target_dtype)
-        V_current = V_current.to(target_dtype)
-        R_U = R_U.to(target_dtype)
-        R_V = R_V.to(target_dtype)
-        # Clone S to preserve gradient tracking (self.S may be trainable parameter)
-        # Using .to() creates a new tensor which breaks autograd connection
+        # print("target_dtype:", target_dtype)
+        # print("x.dtype:", x.dtype)
+        
+        if U_current.dtype != target_dtype:
+            U_current = U_current.to(target_dtype)
+        if V_current.dtype != target_dtype:
+            V_current = V_current.to(target_dtype)
+        if R_U.dtype != target_dtype:
+            R_U = R_U.to(target_dtype)
+        if R_V.dtype != target_dtype:
+            R_V = R_V.to(target_dtype)
+        # S is stored in FP32 for optimizer precision, convert to compute dtype
+        # Note: .to() is differentiable, gradients flow back to self.S
         if self.S.dtype != target_dtype:
             S_current = self.S.to(target_dtype)
         else:

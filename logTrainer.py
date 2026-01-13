@@ -57,6 +57,8 @@ class LogTrainer(Trainer):
         ] = None,
         # CHANGED: Add pissa_config for orthogonality regularization
         pissa_config = None,
+        # CHANGED: Add s_lr_multiplier for separate S learning rate
+        s_lr_multiplier: float = 10.0,
     ):
         super().__init__(
             model=model,
@@ -77,6 +79,9 @@ class LogTrainer(Trainer):
         # CHANGED: Store pissa_config for orthogonality regularization
         self.pissa_config = pissa_config
         
+        # CHANGED: Store s_lr_multiplier for separate S learning rate
+        self.s_lr_multiplier = s_lr_multiplier
+        
         if self.is_peft:
             # CHANGED: Get scaling from rotational PiSSA layer
             for name, module in model.named_modules():
@@ -87,6 +92,56 @@ class LogTrainer(Trainer):
         self.orig_B = None
         self.orig_W = None
         self.gradient_accumulation_counter = 0
+
+    def create_optimizer(self):
+        """Create optimizer with separate learning rate for S parameters.
+        
+        S (singular values) typically have values ~1-16, while R_U/R_V matrices
+        have values ~0-1. With the same LR, S gets proportionally tiny updates.
+        This method gives S a higher LR (s_lr_multiplier × base_lr).
+        """
+        if self.optimizer is not None:
+            return self.optimizer
+        
+        # Separate S parameters from other trainable parameters
+        s_params = []
+        other_params = []
+        
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                # Match S parameters (e.g., "model.layers.0.self_attn.q_proj.S")
+                if name.endswith('.S'):
+                    s_params.append(param)
+                else:
+                    other_params.append(param)
+        
+        base_lr = self.args.learning_rate
+        weight_decay = self.args.weight_decay
+        
+        # Create optimizer with separate param groups
+        optimizer_grouped_parameters = []
+        
+        if other_params:
+            optimizer_grouped_parameters.append({
+                'params': other_params,
+                'lr': base_lr,
+                'weight_decay': weight_decay,
+            })
+        
+        if s_params:
+            optimizer_grouped_parameters.append({
+                'params': s_params,
+                'lr': base_lr * self.s_lr_multiplier,  # Higher LR for S
+                'weight_decay': 0.0,  # No weight decay for singular values
+            })
+            print(f"[LogTrainer] S params: {len(s_params)}, LR: {base_lr * self.s_lr_multiplier:.2e} ({self.s_lr_multiplier}x)")
+            print(f"[LogTrainer] Other params: {len(other_params)}, LR: {base_lr:.2e}")
+        
+        # Use the optimizer class from args
+        optimizer_cls = torch.optim.AdamW
+        self.optimizer = optimizer_cls(optimizer_grouped_parameters)
+        
+        return self.optimizer
 
     def training_step(
         self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]], num_items_in_batch=None

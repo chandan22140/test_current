@@ -1,3 +1,5 @@
 Model	eval_seed	temperature	accuracy
 /home/chandan/DL_Quantization/backup_131/DL_Quantization/PiSSA/test_current/results/peft_test/model=llama_d=meta_math_a=8_r=32_s=128_sd=31/31/checkpoint-781/merged_checkpoint	0	0.8	0.2577710386656558
 results/peft_test/model=llama_d=meta_math_a=128_r=128_s=128_sd=42/42/checkpoint-781/merged_checkpoint	0	0.8	0.38059135708870356
+/home/chandan/DL_Quantization/backup_131/DL_Quantization/PiSSA/test_current/results/peft_test/model=llama_d=meta_math_a=128_r=128_s=128_sd=42-14/42/checkpoint-781/merged_checkpoint	0	0.1	0.4116755117513268
+/home/chandan/DL_Quantization/backup_131/DL_Quantization/PiSSA/test_current/results/peft_test/model=llama_d=meta_math_a=128_r=128_s=128_sd=42-14/42/checkpoint-781/merged_checkpoint	0	0.8	0.38362395754359363

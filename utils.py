@@ -288,7 +288,7 @@ def train_text_to_text_model(
     )
     TrainingArgumentsClass = Seq2SeqTrainingArguments
     TrainerClass = LogTrainer
-    output_dir = f"./results/{run_name}/{kwargs.get('seed')}"
+    output_dir = f"./results/{run_name}-{'14'}/{kwargs.get('seed')}"
     training_args = TrainingArgumentsClass(
         output_dir=output_dir,
         num_train_epochs=kwargs.get("num_train_epochs", 1),

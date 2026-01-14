@@ -34,9 +34,9 @@ def main(lora_alpha=8, lora_rank=32, sample_size=128, seed=31):
     model_id = "google/gemma-3-1b-it"
     model_type = "CausalLM"
     model_dtype = "bf16"
-    dataset_name = "meta_math"
+    dataset_name = "meta_math_full"
     config = dict(
-        model="llama",
+        model=model_id.replace("/", "_"),
         d=dataset_name,
         a=lora_alpha,
         r=lora_rank,
@@ -47,7 +47,7 @@ def main(lora_alpha=8, lora_rank=32, sample_size=128, seed=31):
     if accelerator.is_local_main_process:
         wandb.init(
             name=wandb_name,
-            mode="offline",
+            mode="online",
             group="test",
             # CHANGED: Update project name to reflect rotational PiSSA
             project="LoRA-GA with Rotational PiSSA",
@@ -155,6 +155,7 @@ def main(lora_alpha=8, lora_rank=32, sample_size=128, seed=31):
             max_grad_norm=1.0,
             warmup_ratio=0.03,
             weight_decay=0.0,
+            torch_compile=True,
         ),
     )
     if accelerator.is_local_main_process:

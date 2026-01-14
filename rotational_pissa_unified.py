@@ -658,7 +658,7 @@ class RotationalLinearLayer(nn.Module):
             
             # Note: S_principal already freed by to_free() above
             
-            print(f"Layer {self.adapter_name}: S stats - Min: {self.S.min().item():.4f}, Max: {self.S.max().item():.4f}, Mean: {self.S.mean().item():.4f}, dtype: {self.S.dtype}")
+            # print(f"Layer {self.adapter_name}: S stats - Min: {self.S.min().item():.4f}, Max: {self.S.max().item():.4f}, Mean: {self.S.mean().item():.4f}, dtype: {self.S.dtype}")
     
     def _initialize_rotation_matrices(self):
         """Initialize rotation matrices R_U and R_V based on the selected method."""

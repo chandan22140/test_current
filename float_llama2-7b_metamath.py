@@ -34,7 +34,7 @@ def main(lora_alpha=8, lora_rank=32, sample_size=128, seed=31):
     model_id = "meta-llama/Llama-2-7b-hf"
     model_type = "CausalLM"
     model_dtype = "bf16"
-    dataset_name = "meta_math_full"
+    dataset_name = "meta_math_5k"
     config = dict(
         model=model_id.replace("/", "_"),
         d=dataset_name,
@@ -64,7 +64,7 @@ def main(lora_alpha=8, lora_rank=32, sample_size=128, seed=31):
         lora_alpha=config["a"],
         # CHANGED: Add rotational PiSSA specific parameters
         method="way0",  # Using direct optimization with regularization
-        orthogonality_reg_weight=0.0,  # CHANGED: Disable reg to debug NaNs
+        orthogonality_reg_weight=0,   
         init_identity=True,
         freeze_singular_values=False,
         quantize_residual=False,

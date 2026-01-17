@@ -855,11 +855,13 @@ class RotationalLinearLayer(nn.Module):
         2. determinant: (det(R) - 1)^2 (encourages det = +1)
         3. log_determinant: (log(det(R)) - 0)^2 (numerically stable det constraint)
         """
+        # Early return if regularization is disabled to save compute
+        if self.pissa_config.orthogonality_reg_weight == 0:
+            return torch.tensor(0.0, device=self.R_U.device if hasattr(self, 'R_U') else next(self.parameters()).device)
+        
         if self.pissa_config.method != "way0":
             # For ways 1, 2, 3: orthogonality is guaranteed by construction
             device = next(self.parameters()).device
-            print("device:" ,device)
-
             return torch.tensor(0.0, device=device)
         
         reg_type = self.pissa_config.regularization_type

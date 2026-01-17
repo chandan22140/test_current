@@ -1,0 +1,43 @@
+program: train_glue_deberta.py
+method: bayes
+project: glue-deberta-mrpc
+metric:
+  name: best_metric
+  goal: maximize
+
+parameters:
+  task:
+    value: mrpc
+  
+  method:
+    values: ["way0"]
+  
+  batch-size:
+    values: [16]
+  
+  lr:
+    distribution: log_uniform_values
+    min: e-5
+    max: 1e-3
+  
+  rank:
+    values: [64]
+  
+  epochs:
+    value: 2
+  
+  orthogonality_weight:
+    min: 0.001
+    max: 0.05
+    distribution: uniform
+
+  weight_decay:
+    min: 0.00001
+    max: 0.001
+    distribution: log_uniform_values
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args}

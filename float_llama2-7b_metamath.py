@@ -31,7 +31,7 @@ import os
 
 def main(lora_alpha=8, lora_rank=32, sample_size=128, seed=31):
     accelerator = Accelerator()
-    model_id = "google/gemma-3-1b-it"
+    model_id = "meta-llama/Llama-2-7b-hf"
     model_type = "CausalLM"
     model_dtype = "bf16"
     dataset_name = "meta_math_full"

@@ -1119,6 +1119,7 @@ def replace_linear_with_rotational_pissa(
     model: nn.Module,
     pissa_config: RotationalPiSSAConfig,
     target_modules: Optional[List[str]] = None,
+    exclude_modules: Optional[List[str]] = None,
     adapter_name: str = "default",
     freeze_base_model: bool = True
 ) -> Dict[str, RotationalLinearLayer]:
@@ -1137,6 +1138,7 @@ def replace_linear_with_rotational_pissa(
         model: The model to modify
         pissa_config: Configuration for the rotational adapters
         target_modules: List of module names to target (e.g., ["q_proj", "v_proj"])
+        exclude_modules: List of module names to exclude (e.g., ["pooler", "classifier"])
         adapter_name: Name of the adapter
         freeze_base_model: If True, freeze all model params except adapter trainable params
     
@@ -1151,6 +1153,12 @@ def replace_linear_with_rotational_pissa(
     # First pass: identify all layers to replace (avoid modifying dict during iteration)
     for name, module in model.named_modules():
         if isinstance(module, nn.Linear):
+            # Check if this module should be excluded
+            if exclude_modules is not None:
+                should_exclude = any(excl in name for excl in exclude_modules)
+                if should_exclude:
+                    continue  # Skip this layer
+            
             # Check if this module should be replaced
             if target_modules is None:
                 should_replace = True

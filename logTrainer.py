@@ -138,8 +138,8 @@ class LogTrainer(Trainer):
             print(f"[LogTrainer] Other params: {len(other_params)}, LR: {base_lr:.2e}")
         
         # Use the optimizer class from args
-        optimizer_cls = torch.optim.AdamW
-        self.optimizer = optimizer_cls(optimizer_grouped_parameters)
+        # Using eps=1e-10 instead of default 1e-8 for better precision with small gradients
+        self.optimizer = torch.optim.AdamW(optimizer_grouped_parameters, eps=1e-10)
         
         return self.optimizer
 

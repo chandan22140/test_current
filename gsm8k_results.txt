@@ -3,3 +3,4 @@ Model	eval_seed	temperature	accuracy
 results/peft_test/model=llama_d=meta_math_a=128_r=128_s=128_sd=42/42/checkpoint-781/merged_checkpoint	0	0.8	0.38059135708870356
 /home/chandan/DL_Quantization/backup_131/DL_Quantization/PiSSA/test_current/results/peft_test/model=llama_d=meta_math_a=128_r=128_s=128_sd=42-14/42/checkpoint-781/merged_checkpoint	0	0.1	0.4116755117513268
 /home/chandan/DL_Quantization/backup_131/DL_Quantization/PiSSA/test_current/results/peft_test/model=llama_d=meta_math_a=128_r=128_s=128_sd=42-14/42/checkpoint-781/merged_checkpoint	0	0.8	0.38362395754359363
+/home/chandan/DL_Quantization/backup_131/DL_Quantization/PiSSA/results/peft_test/model=google_gemma-3-1b-it_d=meta_math_5k_a=128_r=128_s=128_sd=42-14/42/checkpoint-36/merged_checkpoint	0	0.8	0.4071266110689917

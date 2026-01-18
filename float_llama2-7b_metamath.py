@@ -17,21 +17,18 @@ from rotational_pissa_unified import (
 # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 from accelerate import Accelerator
 from utils import (
-    transform_dataset,
     initialize_text_to_text_model,
     find_all_linear_modules,
     train_text_to_text_model,
-    # CHANGED: Need to add gradient estimation utilities
-    estimate_gradient,
 )
 from data import DATASET_MAP
 import wandb
 import os
 
 
-def main(lora_alpha=8, lora_rank=32, sample_size=128, seed=31):
+def main(lora_alpha=128, lora_rank=128, sample_size=128, seed=42):
     accelerator = Accelerator()
-    model_id = "meta-llama/Llama-2-7b-hf"
+    model_id = "google/gemma-3-1b-it"
     model_type = "CausalLM"
     model_dtype = "bf16"
     dataset_name = "meta_math_5k"
@@ -44,13 +41,14 @@ def main(lora_alpha=8, lora_rank=32, sample_size=128, seed=31):
         sd=seed,
     )
     wandb_name = "_".join([f"{k}={v}" for k, v in config.items()])
+    # wandb_name+="newarmup"
     if accelerator.is_local_main_process:
         wandb.init(
             name=wandb_name,
             mode="online",
             group="test",
             # CHANGED: Update project name to reflect rotational PiSSA
-            project="LoRA-GA with Rotational PiSSA",
+            project="Gemma SOARA",
         )
     model, tokenizer = initialize_text_to_text_model(
         model_id, model_type, model_dtype, flash_attention=False
@@ -73,33 +71,7 @@ def main(lora_alpha=8, lora_rank=32, sample_size=128, seed=31):
 
     dataset_func = DATASET_MAP[dataset_name]
     train_set, val_set, _ = dataset_func()
-    
-    # CHANGED: Use pissa_config instead of peft_config
-    # Note: Need to set iterations based on sample_size
-    iters = config["s"] // 2
-    bsz = 2  # Default batch size for gradient estimation
-    max_length = 1024  # Default max length
-    
-    if isinstance(train_set, list):
-        temp_set = train_set[: bsz * iters]
-    else:
-        temp_set = train_set.select(range(bsz * iters))
-    transform_dataset(
-        model_type=model_type,
-        dataset=temp_set,
-        tokenizer=tokenizer,
-        max_length=max_length,
-    )
-    dataloader = torch.utils.data.DataLoader(temp_set, batch_size=bsz)
 
-    # CHANGED: Estimate gradient using custom implementation (PiSSA doesn't need LoraGAContext)
-    named_grad = estimate_gradient(
-        model=model,
-        dataloader=dataloader,
-        accelerator=accelerator,
-        quant_flag=False,
-    )
-    
     if accelerator.is_local_main_process:
         print(pissa_config)
     
@@ -138,7 +110,7 @@ def main(lora_alpha=8, lora_rank=32, sample_size=128, seed=31):
         per_device_batch_size=1,
         real_batch_size=128,
         bf16=(model_dtype == "bf16"),
-        eval_epochs=1,
+        eval_epochs=0.25,
         early_stopping_patience=3,
         max_length=1024,
         logging_steps=1,
@@ -171,9 +143,9 @@ def main(lora_alpha=8, lora_rank=32, sample_size=128, seed=31):
         model, tokenizer = initialize_text_to_text_model(
             model_id, model_type, model_dtype, flash_attention=False
         )
-        checkpoint = torch.load(os.path.join(save_dir, "final_checkpoint.pt"), weights_only=False)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        print(model)
+        # checkpoint = torch.load(os.path.join(save_dir, "final_checkpoint.pt"), weights_only=False)
+        # model.load_state_dict(checkpoint['model_state_dict'])
+        # print(model)
 
 
 if __name__ == "__main__":

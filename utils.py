@@ -128,6 +128,14 @@ def SeqToSeqEncode(example, tokenizer, max_length=None, ignore_masked_token=Fals
 
     return results
 
+def transform_dataset(model_type, tokenizer, dataset, max_length):
+    if model_type == "CausalLM":
+        dataset.set_transform(lambda x: causalLMEncode(x, tokenizer, max_length))
+    elif model_type == "ConditionalGeneration":
+        dataset.set_transform(lambda x: SeqToSeqEncode(x, tokenizer, max_length))
+    else:
+        raise ValueError("Wrong model type")
+    return dataset
 
 def preprocess_dataset(
     dataset: tp.Union[Dataset, tp.List[tp.Tuple[str, str]], tp.List[tp.Dict[str, str]]]
@@ -198,63 +206,6 @@ def initialize_text_to_text_model(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     return model, tokenizer
-
-
-def transform_dataset(model_type, tokenizer, dataset, max_length):
-    if model_type == "CausalLM":
-        dataset.set_transform(lambda x: causalLMEncode(x, tokenizer, max_length))
-    elif model_type == "ConditionalGeneration":
-        dataset.set_transform(lambda x: SeqToSeqEncode(x, tokenizer, max_length))
-    else:
-        raise ValueError("Wrong model type")
-    return dataset
-
-
-# CHANGED: Add gradient estimation function for LoRA-GA compatibility
-def estimate_gradient(model, dataloader, accelerator, quant_flag=False):
-    """
-    Estimate gradients for gradient-guided adapter initialization (LoRA-GA).
-    
-    Note: For rotational PiSSA, gradient estimation is not strictly needed since
-    SVD decomposition inherently captures weight structure. However, we keep this
-    function for compatibility with LoRA-GA workflow.
-    
-    Returns a dict of named gradients (placeholder implementation).
-    """
-    import torch
-    
-    named_grad = {}
-    
-    # CHANGED: Move model to accelerator device first
-    model = model.to(accelerator.device)
-    model.train()
-    
-    # Compute gradients on a small subset
-    for batch_idx, batch in enumerate(dataloader):
-        if batch_idx >= 2:  # Only use first 2 batches for gradient estimation
-            break
-        
-        # CHANGED: Move batch to accelerator device
-        batch = {k: v.to(accelerator.device) if isinstance(v, torch.Tensor) else v 
-                for k, v in batch.items()}
-        
-        # Forward pass
-        outputs = model(**batch)
-        loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
-        
-        # Backward pass using accelerator
-        loss.backward()
-    
-    # Collect gradients
-    for name, param in model.named_parameters():
-        if param.grad is not None:
-            named_grad[name] = param.grad.detach().clone()
-    
-    # Zero gradients
-    model.zero_grad()
-    
-    # CHANGED: Model is now on accelerator.device and ready for rotational PiSSA
-    return named_grad
 
 
 def train_text_to_text_model(

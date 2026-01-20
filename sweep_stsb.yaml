@@ -17,14 +17,14 @@ parameters:
   
   lr:
     distribution: log_uniform_values
-    min: 1e-5
+    min: 1e-4
     max: 1e-3
   
   rank:
     values: [64]
   
   epochs:
-    value: 2
+    value: 25
   
   orthogonality_weight:
     min: 0.001

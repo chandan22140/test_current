@@ -1114,6 +1114,91 @@ class RotationalPiSSATrainer:
     #     return self.adapters[0].current_cycle >= self.config.total_cycles
 
 # ============================================================================
+# BATCHED SVD HELPER FOR FAST INITIALIZATION
+# ============================================================================
+
+def _create_adapter_from_svd(
+    base_layer: nn.Linear,
+    pissa_config: 'RotationalPiSSAConfig',
+    adapter_name: str,
+    U: torch.Tensor,  # Full U from SVD [out_features, k]
+    S: torch.Tensor,  # Full S from SVD [k]
+    V: torch.Tensor,  # Full V from SVD [k, in_features]
+    original_dtype: torch.dtype,
+    original_device: torch.device
+) -> 'RotationalLinearLayer':
+    """
+    Create a RotationalLinearLayer from pre-computed SVD results.
+    
+    This is used by batched SVD processing to avoid redundant per-layer SVD computation.
+    The SVD is computed once in a batch for all layers with the same shape, then this
+    function creates adapters from those pre-computed results.
+    """
+    r = pissa_config.r
+    
+    # Create adapter instance WITHOUT calling _initialize_svd_components
+    adapter = object.__new__(RotationalLinearLayer)
+    nn.Module.__init__(adapter)
+    
+    adapter.base_layer = base_layer
+    adapter.pissa_config = pissa_config
+    adapter.adapter_name = adapter_name
+    adapter.r = r
+    adapter.in_features = base_layer.in_features
+    adapter.out_features = base_layer.out_features
+    
+    # Split into principal and residual components
+    U_principal = U[:, :r].contiguous()
+    U_residual = U[:, r:].contiguous()
+    S_principal = S[:r].contiguous()
+    S_residual = S[r:].contiguous()
+    V_principal = V[:r, :].contiguous()
+    V_residual = V[r:, :].contiguous()
+    
+    # Compute W_residual = U_residual @ diag(S_residual) @ V_residual
+    if U_residual.shape[1] > 0:
+        W_residual = U_residual @ torch.diag(S_residual) @ V_residual
+    else:
+        W_residual = torch.zeros(adapter.out_features, adapter.in_features, 
+                                  dtype=torch.float32, device=original_device)
+    
+    # Set base layer weight to W_residual (frozen)
+    with torch.no_grad():
+        adapter.base_layer.weight.data = W_residual.to(dtype=original_dtype, device=original_device)
+        adapter.base_layer.weight.requires_grad = False
+    
+    # Store principal components as buffers
+    adapter.register_buffer("U", U_principal.to(dtype=original_dtype, device=original_device))
+    adapter.register_buffer("V", V_principal.to(dtype=original_dtype, device=original_device))
+    
+    # S: stored as FP32 if s_dtype_fp32 is enabled
+    s_dtype = torch.float32 if pissa_config.s_dtype_fp32 else original_dtype
+    S_converted = S_principal.to(dtype=s_dtype, device=original_device)
+    if pissa_config.freeze_singular_values:
+        adapter.register_buffer("S", S_converted)
+    else:
+        adapter.S = nn.Parameter(S_converted)
+    
+    # Initialize rotation matrices
+    adapter._initialize_rotation_matrices()
+    
+    # Dropout
+    if pissa_config.lora_dropout > 0:
+        adapter.dropout = nn.Dropout(pissa_config.lora_dropout)
+    else:
+        adapter.dropout = nn.Identity()
+    
+    adapter.scaling = 1
+    
+    # Training state for Way 1
+    if pissa_config.method == "way1":
+        adapter.current_layer_index = 0
+        adapter.current_cycle = 0
+        adapter.step_count = 0
+    
+    return adapter
+
+# ============================================================================
 # MODEL REPLACEMENT UTILITIES
 # ============================================================================
 
@@ -1172,36 +1257,211 @@ def replace_linear_with_rotational_pissa(
     
     print(f"  Found {len(layers_to_replace)} layers to replace")
     
-    # Second pass: replace layers one at a time with cleanup
-    for idx, (name, module) in enumerate(layers_to_replace):
-        if (idx + 1) % 10 == 0 or (idx + 1) == len(layers_to_replace):
-            print(f"  [{idx+1}/{len(layers_to_replace)}] Processing layers...")
+    # ========== OPTIMIZED: Group layers by shape for parallel processing ==========
+    # Group layers by (out_features, in_features) shape for efficient batching
+    shape_groups = {}
+    for name, module in layers_to_replace:
+        shape = (module.out_features, module.in_features)
+        shape_groups.setdefault(shape, []).append((name, module))
+    
+    print(f"  Grouped into {len(shape_groups)} shape groups: {[f'{s}: {len(g)} layers' for s, g in shape_groups.items()]}")
+    
+    # Create CUDA streams for parallel processing
+    # NOTE: Disable streams on multi-GPU setups to avoid NCCL conflicts with DataParallel
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    use_streams = torch.cuda.is_available() and num_gpus == 1  # Only use streams on single GPU
+    
+    if use_streams:
+        num_streams = 4
+        streams = [torch.cuda.Stream() for _ in range(num_streams)]
+        print(f"  Using {num_streams} CUDA streams for parallel SVD (single GPU mode)")
+    else:
+        streams = None
+        if num_gpus > 1:
+            print(f"  Multi-GPU detected ({num_gpus} GPUs) - using sequential processing to avoid NCCL conflicts")
+    
+    total_processed = 0
+    
+    # Process each shape group - use BATCHED SVD for maximum GPU utilization
+    for shape, group_layers in shape_groups.items():
+        batch_size = len(group_layers)
+        print(f"  Processing shape {shape}: {batch_size} layers (batched SVD)...")
         
-        # Create rotational adapter
-        adapted_layer = RotationalLinearLayer(module, pissa_config, adapter_name)
-        
-        # Replace the module
-        parent_name = ".".join(name.split(".")[:-1])
-        child_name = name.split(".")[-1]
-        
-        if parent_name:
-            parent_module = model.get_submodule(parent_name)
-            setattr(parent_module, child_name, adapted_layer)
+        if use_streams and batch_size > 1:
+            # ========== ADAPTIVE BATCHED SVD with memory management ==========
+            import time
+            
+            # Get dtype/device from first layer
+            first_module = group_layers[0][1]
+            original_dtype = first_module.weight.dtype
+            original_device = first_module.weight.device
+            
+            # DIAGNOSTIC: Verify GPU is available and being used
+            print(f"    Device: {original_device}, dtype: {original_dtype}")
+            if not original_device.type == 'cuda':
+                print(f"    WARNING: Weights are on {original_device}, not CUDA! Moving to GPU...")
+                # Use current CUDA device (respects CUDA_VISIBLE_DEVICES)
+                original_device = torch.device(f'cuda:{torch.cuda.current_device()}')
+            
+            # Estimate memory required for this batch
+            out_feat, in_feat = shape
+            # Memory for stacked weights in FP32: batch_size * out_feat * in_feat * 4 bytes
+            # SVD output (U, S, V) roughly doubles this
+            bytes_per_matrix = out_feat * in_feat * 4  # FP32
+            estimated_gb = (batch_size * bytes_per_matrix * 2) / (1024**3)  # Input + Output
+            
+            # Target 4GB per batch to be safe (leaves room for other ops)
+            MAX_BATCH_GB = 4.0
+            
+            if estimated_gb > MAX_BATCH_GB:
+                # Split into smaller sub-batches
+                matrices_per_batch = max(1, int(batch_size * (MAX_BATCH_GB / estimated_gb)))
+                num_sub_batches = (batch_size + matrices_per_batch - 1) // matrices_per_batch
+                print(f"    Memory estimate: {estimated_gb:.2f} GB > {MAX_BATCH_GB} GB limit")
+                print(f"    Splitting into {num_sub_batches} sub-batches of ~{matrices_per_batch} layers each")
+            else:
+                matrices_per_batch = batch_size
+                num_sub_batches = 1
+                print(f"    Memory estimate: {estimated_gb:.2f} GB (fits in single batch)")
+            
+            # Process in sub-batches
+            all_U, all_S, all_V = [], [], []
+            
+            for sub_batch_idx in range(num_sub_batches):
+                start_idx = sub_batch_idx * matrices_per_batch
+                end_idx = min(start_idx + matrices_per_batch, batch_size)
+                sub_batch = group_layers[start_idx:end_idx]
+                sub_batch_size = len(sub_batch)
+                
+                if num_sub_batches > 1:
+                    print(f"    Sub-batch {sub_batch_idx+1}/{num_sub_batches}: processing {sub_batch_size} layers...")
+                
+                # Stack weights for this sub-batch
+                start_time = time.time()
+                weight_batch = torch.stack([m.weight.data.to(original_device) for _, m in sub_batch])
+                stack_time = time.time() - start_time
+                
+                if sub_batch_idx == 0:  # Only print details for first sub-batch
+                    print(f"    Stacked {sub_batch_size} weights: shape={weight_batch.shape}, device={weight_batch.device}, dtype={weight_batch.dtype}")
+                
+                # SVD requires FP32 - convert but STAY ON GPU
+                # VRAM optimization: explicitly free old tensor during conversion
+                if weight_batch.dtype in (torch.bfloat16, torch.float16):
+                    old_dtype = weight_batch.dtype
+                    weight_batch_fp32 = weight_batch.float()  # Create FP32 copy
+                    del weight_batch  # Free original BF16/FP16 tensor (saves ~50% memory)
+                    weight_batch = weight_batch_fp32
+                    if sub_batch_idx == 0:
+                        print(f"    Converted {old_dtype} -> FP32: device={weight_batch.device}")
+                
+                # Ensure we're on CUDA before SVD
+                assert weight_batch.device.type == 'cuda', f"weight_batch moved to {weight_batch.device}!"
+                
+                # Batched SVD for this sub-batch
+                if sub_batch_idx == 0:
+                    print(f"    Running batched SVD on {weight_batch.device}...")
+                
+                # NOTE: torch.cuda.synchronize() is for accurate timing only
+                # PyTorch GPU ops are async - without sync, time.time() only measures CPU overhead
+                # Set ENABLE_TIMING=False to skip sync and run ~5% faster (but no timing info)
+                ENABLE_TIMING = False
+                
+                if ENABLE_TIMING:
+                    torch.cuda.synchronize()  # Wait for previous ops before starting timer
+                svd_start = time.time()
+                
+                U_batch, S_batch, V_batch = torch.linalg.svd(weight_batch, full_matrices=False)
+                
+                if ENABLE_TIMING:
+                    torch.cuda.synchronize()  # Wait for SVD to complete before stopping timer
+                svd_time = time.time() - svd_start
+                
+                if sub_batch_idx == 0 or num_sub_batches > 1:
+                    print(f"    ✓ Sub-batch SVD complete in {svd_time:.2f}s (stack: {stack_time:.2f}s)")
+                
+                # Store results
+                all_U.append(U_batch)
+                all_S.append(S_batch)
+                all_V.append(V_batch)
+                
+                del weight_batch
+                torch.cuda.empty_cache()  # Free memory between sub-batches
+            
+            # Concatenate all sub-batch results
+            U_batch = torch.cat(all_U, dim=0)
+            S_batch = torch.cat(all_S, dim=0)
+            V_batch = torch.cat(all_V, dim=0)
+            
+            del all_U, all_S, all_V
+            
+            if num_sub_batches == 1:
+                print(f"    Result devices: U={U_batch.device}, S={S_batch.device}, V={V_batch.device}")
+            
+            # Now create adapters using pre-computed SVD results
+            r = pissa_config.r
+            
+            for i, (name, module) in enumerate(group_layers):
+                # Extract this layer's SVD components
+                U_i = U_batch[i]  # [out_features, k]
+                S_i = S_batch[i]  # [k]
+                V_i = V_batch[i]  # [k, in_features]
+                
+                # Create adapter with pre-computed SVD (bypass _initialize_svd_components)
+                adapted_layer = _create_adapter_from_svd(
+                    module, pissa_config, adapter_name,
+                    U_i, S_i, V_i, original_dtype, original_device
+                )
+                
+                # Replace the module in model
+                parent_name = ".".join(name.split(".")[:-1])
+                child_name = name.split(".")[-1]
+                
+                if parent_name:
+                    parent_module = model.get_submodule(parent_name)
+                    setattr(parent_module, child_name, adapted_layer)
+                else:
+                    setattr(model, child_name, adapted_layer)
+                
+                adapters[name] = adapted_layer
+                del module
+                
+                total_processed += 1
+                if total_processed % 20 == 0:
+                    print(f"    [{total_processed}/{len(layers_to_replace)}] layers processed...")
+            
+            # Clean up batch tensors
+            del U_batch, S_batch, V_batch
+            
         else:
-            setattr(model, child_name, adapted_layer)
+            # Fallback: sequential processing (single layer or CPU)
+            for name, module in group_layers:
+                adapted_layer = RotationalLinearLayer(module, pissa_config, adapter_name)
+                
+                parent_name = ".".join(name.split(".")[:-1])
+                child_name = name.split(".")[-1]
+                
+                if parent_name:
+                    parent_module = model.get_submodule(parent_name)
+                    setattr(parent_module, child_name, adapted_layer)
+                else:
+                    setattr(model, child_name, adapted_layer)
+                
+                adapters[name] = adapted_layer
+                del module
+                total_processed += 1
         
-        adapters[name] = adapted_layer
-        
-        # Aggressive cleanup after each layer to prevent VRAM accumulation
-        # Note: Only delete module, not adapted_layer (it's referenced in adapters dict)
-        del module
+        # Cleanup once per shape group (not per layer!) - much faster
         gc.collect()
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    
+    print(f"  ✓ All {total_processed} layers processed")
     
     # Final cleanup
-    del layers_to_replace
+    del layers_to_replace, shape_groups
     gc.collect()
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     # Apply freezing strategy if requested
     if freeze_base_model:

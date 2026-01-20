@@ -13,3 +13,5 @@ snapshot/
 
 # Weights & Biases logs
 wandb/
+data/
+*.tar.gz

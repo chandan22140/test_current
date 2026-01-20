@@ -13,18 +13,18 @@ parameters:
     values: ["way0"]
   
   batch-size:
-    values: [16]
+    values: [32]
   
   lr:
     distribution: log_uniform_values
-    min: e-5
+    min: 1e-4
     max: 1e-3
   
   rank:
     values: [64]
   
   epochs:
-    value: 2
+    value: 15
   
   orthogonality_weight:
     min: 0.001

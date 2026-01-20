@@ -28,10 +28,10 @@ import os
 
 def main(lora_alpha=128, lora_rank=128, sample_size=128, seed=42):
     accelerator = Accelerator()
-    model_id = "google/gemma-3-1b-it"
+    model_id = "google/gemma-7b"
     model_type = "CausalLM"
     model_dtype = "bf16"
-    dataset_name = "meta_math_5k"
+    dataset_name = "meta_math_full"
     config = dict(
         model=model_id.replace("/", "_"),
         d=dataset_name,
@@ -116,7 +116,7 @@ def main(lora_alpha=128, lora_rank=128, sample_size=128, seed=42):
         logging_steps=1,
         use_loraplus=False,
         loraplus_lr_ratio=None,
-        learning_rate=2e-5,
+        learning_rate=2e-4,
         num_process=accelerator.num_processes,
         gradient_checkpointing=False,
         seed=seed,

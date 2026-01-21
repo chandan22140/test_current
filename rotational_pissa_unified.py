@@ -1268,17 +1268,20 @@ def replace_linear_with_rotational_pissa(
     
     # Create CUDA streams for parallel processing
     # NOTE: Disable streams on multi-GPU setups to avoid NCCL conflicts with DataParallel
+    # However, batched SVD (torch.linalg.svd on stacked tensors) works fine on any GPU count
     num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
-    use_streams = torch.cuda.is_available() and num_gpus == 1  # Only use streams on single GPU
+    use_cuda = torch.cuda.is_available()
+    use_streams = use_cuda and num_gpus == 1  # Only use streams for overlapping on single GPU
     
     if use_streams:
         num_streams = 4
         streams = [torch.cuda.Stream() for _ in range(num_streams)]
         print(f"  Using {num_streams} CUDA streams for parallel SVD (single GPU mode)")
+    elif num_gpus > 1:
+        streams = None
+        print(f"  Multi-GPU detected ({num_gpus} GPUs) - using batched SVD without streams (NCCL-safe)")
     else:
         streams = None
-        if num_gpus > 1:
-            print(f"  Multi-GPU detected ({num_gpus} GPUs) - using sequential processing to avoid NCCL conflicts")
     
     total_processed = 0
     
@@ -1287,7 +1290,8 @@ def replace_linear_with_rotational_pissa(
         batch_size = len(group_layers)
         print(f"  Processing shape {shape}: {batch_size} layers (batched SVD)...")
         
-        if use_streams and batch_size > 1:
+        # Use batched SVD when on GPU with multiple layers (works on single or multi-GPU)
+        if use_cuda and batch_size > 1:
             # ========== ADAPTIVE BATCHED SVD with memory management ==========
             import time
             
@@ -1311,7 +1315,7 @@ def replace_linear_with_rotational_pissa(
             estimated_gb = (batch_size * bytes_per_matrix * 2) / (1024**3)  # Input + Output
             
             # Target 4GB per batch to be safe (leaves room for other ops)
-            MAX_BATCH_GB = 4.0
+            MAX_BATCH_GB = 1.0
             
             if estimated_gb > MAX_BATCH_GB:
                 # Split into smaller sub-batches
@@ -1324,8 +1328,10 @@ def replace_linear_with_rotational_pissa(
                 num_sub_batches = 1
                 print(f"    Memory estimate: {estimated_gb:.2f} GB (fits in single batch)")
             
-            # Process in sub-batches
-            all_U, all_S, all_V = [], [], []
+            # Process in sub-batches - create adapters IMMEDIATELY after each sub-batch
+            # to avoid accumulating all SVD results in memory (which caused OOM)
+            r = pissa_config.r
+            adapter_idx = 0  # Track which layer we're on in group_layers
             
             for sub_batch_idx in range(num_sub_batches):
                 start_idx = sub_batch_idx * matrices_per_batch
@@ -1379,58 +1385,44 @@ def replace_linear_with_rotational_pissa(
                 if sub_batch_idx == 0 or num_sub_batches > 1:
                     print(f"    ✓ Sub-batch SVD complete in {svd_time:.2f}s (stack: {stack_time:.2f}s)")
                 
-                # Store results
-                all_U.append(U_batch)
-                all_S.append(S_batch)
-                all_V.append(V_batch)
-                
+                # Free weight batch immediately
                 del weight_batch
+                
+                # Create adapters IMMEDIATELY from this sub-batch's SVD results
+                # This prevents OOM from accumulating all sub-batch results
+                for i, (name, module) in enumerate(sub_batch):
+                    # Extract this layer's SVD components
+                    U_i = U_batch[i]  # [out_features, k]
+                    S_i = S_batch[i]  # [k]
+                    V_i = V_batch[i]  # [k, in_features]
+                    
+                    # Create adapter with pre-computed SVD (bypass _initialize_svd_components)
+                    adapted_layer = _create_adapter_from_svd(
+                        module, pissa_config, adapter_name,
+                        U_i, S_i, V_i, original_dtype, original_device
+                    )
+                    
+                    # Replace the module in model
+                    parent_name = ".".join(name.split(".")[:-1])
+                    child_name = name.split(".")[-1]
+                    
+                    if parent_name:
+                        parent_module = model.get_submodule(parent_name)
+                        setattr(parent_module, child_name, adapted_layer)
+                    else:
+                        setattr(model, child_name, adapted_layer)
+                    
+                    adapters[name] = adapted_layer
+                    del module
+                    
+                    total_processed += 1
+                    adapter_idx += 1
+                    if total_processed % 20 == 0:
+                        print(f"    [{total_processed}/{len(layers_to_replace)}] layers processed...")
+                
+                # Clean up this sub-batch's SVD tensors BEFORE next sub-batch
+                del U_batch, S_batch, V_batch
                 torch.cuda.empty_cache()  # Free memory between sub-batches
-            
-            # Concatenate all sub-batch results
-            U_batch = torch.cat(all_U, dim=0)
-            S_batch = torch.cat(all_S, dim=0)
-            V_batch = torch.cat(all_V, dim=0)
-            
-            del all_U, all_S, all_V
-            
-            if num_sub_batches == 1:
-                print(f"    Result devices: U={U_batch.device}, S={S_batch.device}, V={V_batch.device}")
-            
-            # Now create adapters using pre-computed SVD results
-            r = pissa_config.r
-            
-            for i, (name, module) in enumerate(group_layers):
-                # Extract this layer's SVD components
-                U_i = U_batch[i]  # [out_features, k]
-                S_i = S_batch[i]  # [k]
-                V_i = V_batch[i]  # [k, in_features]
-                
-                # Create adapter with pre-computed SVD (bypass _initialize_svd_components)
-                adapted_layer = _create_adapter_from_svd(
-                    module, pissa_config, adapter_name,
-                    U_i, S_i, V_i, original_dtype, original_device
-                )
-                
-                # Replace the module in model
-                parent_name = ".".join(name.split(".")[:-1])
-                child_name = name.split(".")[-1]
-                
-                if parent_name:
-                    parent_module = model.get_submodule(parent_name)
-                    setattr(parent_module, child_name, adapted_layer)
-                else:
-                    setattr(model, child_name, adapted_layer)
-                
-                adapters[name] = adapted_layer
-                del module
-                
-                total_processed += 1
-                if total_processed % 20 == 0:
-                    print(f"    [{total_processed}/{len(layers_to_replace)}] layers processed...")
-            
-            # Clean up batch tensors
-            del U_batch, S_batch, V_batch
             
         else:
             # Fallback: sequential processing (single layer or CPU)

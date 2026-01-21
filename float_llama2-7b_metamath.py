@@ -26,7 +26,7 @@ import wandb
 import os
 
 
-def main(lora_alpha=128, lora_rank=128, sample_size=128, seed=42):
+def main(lora_alpha=128, lora_rank=128, sample_size=128, seed=42, resume_from_checkpoint=None):
     accelerator = Accelerator()
     model_id = "google/gemma-7b"
     model_type = "CausalLM"
@@ -122,6 +122,8 @@ def main(lora_alpha=128, lora_rank=128, sample_size=128, seed=42):
         seed=seed,
         # CHANGED: Pass pissa_config for orthogonality regularization
         pissa_config=pissa_config,
+        # CHANGED: Pass resume_from_checkpoint for resuming training
+        resume_from_checkpoint=resume_from_checkpoint,
         training_args=dict(
             lr_scheduler_type="cosine",
             max_grad_norm=1.0,

@@ -447,9 +447,9 @@ def main():
     # Configuration
     models = [
         "google/vit-base-patch16-224",
-        # "meta-llama/Llama-2-7b-hf",
-        # "mistralai/Mistral-7B-v0.1", 
-        # "meta-llama/Meta-Llama-3-8B",
+        "meta-llama/Llama-2-7b-hf",
+        "mistralai/Mistral-7B-v0.1", 
+        "meta-llama/Meta-Llama-3-8B",
     ]
     
     ranks = [8, 16, 32, 64, 128]

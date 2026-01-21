@@ -266,6 +266,8 @@ def train_text_to_text_model(
         seed=kwargs.get("seed", 42),
         ddp_find_unused_parameters=False,
         save_safetensors=False,
+        dataloader_num_workers=4,
+        dataloader_pin_memory=True,
         **kwargs.get("training_args", {}),
     )
 
@@ -285,6 +287,6 @@ def train_text_to_text_model(
         s_lr_multiplier=kwargs.get("s_lr_multiplier", 10.0),  # CHANGED: Higher LR for S params
     )
 
-    trainer.train()
+    trainer.train(resume_from_checkpoint=kwargs.get("resume_from_checkpoint", None))
 
     return model

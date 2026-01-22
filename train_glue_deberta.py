@@ -143,6 +143,8 @@ class GLUEConfig:
     use_wandb: bool = True
     project_name: str = "glue-deberta-rotational-pissa"
     output_dir: str = "./glue_results"
+    logging_steps: int = 100
+    max_steps: int = -1
     
     # Model architecture
     no_pooler: bool = False  # If True, use CLS token directly instead of pooler
@@ -515,9 +517,10 @@ class GLUETrainer:
     def _train_epoch(self, epoch: int) -> float:
         """Train for one epoch."""
         self.model.train()
-        total_loss = 0
+        total_loss = torch.tensor(0.0, device=self.device)
         total_grad_norm = 0
         num_steps = 0
+        num_logging_steps = 0
         
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch + 1}")
         for batch in pbar:
@@ -539,24 +542,44 @@ class GLUETrainer:
             
             # Compute gradient norm before clipping
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-            total_grad_norm += grad_norm.item()
+            
+            # Optimization: Only sync to CPU (item()) if we are going to log
+            is_logging_step = (num_steps % self.config.logging_steps == 0)
+            
+            if is_logging_step:
+                grad_norm_val = grad_norm.item()
+                loss_val = loss.item()
+                total_grad_norm += grad_norm_val
+                num_logging_steps += 1
+
             num_steps += 1
             
             self.optimizer.step()
             self.scheduler.step()
             
-            total_loss += loss.item()
-            # pbar.set_postfix({"loss": loss.item(), "grad_norm": f"{grad_norm.item():.4f}"})
+            # Update Rotational PiSSA phase (for Way 1)
+            if self.pissa_config.method == "way1" and self.rotational_trainer.should_step_phase(num_steps):
+                self.rotational_trainer.step_phase()
+            
+            # Accumulate loss on GPU to avoid sync
+            total_loss += loss.detach()
             
             # Log per-step metrics to wandb
-            if self.config.use_wandb:
+            if self.config.use_wandb and is_logging_step:
                 wandb.log({
-                    "train/loss": loss.item(),
-                    "train/grad_norm": grad_norm.item(),
+                    "train/loss": loss_val,
+                    "train/grad_norm": grad_norm_val,
                     "train/lr": self.scheduler.get_last_lr()[0],
                 })
+            
+            # Stop if max_steps reached
+            if self.config.max_steps > 0 and num_steps >= self.config.max_steps:
+                break
         
-        return total_loss / len(self.train_loader), total_grad_norm / num_steps
+        avg_loss = total_loss.item() / len(self.train_loader)
+        avg_grad_norm = total_grad_norm / max(1, num_logging_steps)
+        
+        return avg_loss, avg_grad_norm
     
     def _evaluate(self, loader=None) -> Dict[str, float]:
         """Evaluate on validation set."""
@@ -602,6 +625,7 @@ class GLUETrainer:
 
 def run_single_experiment(config: GLUEConfig) -> Dict[str, float]:
     """Run a single experiment and return results."""
+    print("Running experiment with config:", config)
     trainer = GLUETrainer(config)
     return trainer.train()
 
@@ -623,11 +647,14 @@ def main():
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--logging_steps", type=int, default=100,
+                        help="Log every X steps")
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--orthogonality_weight", type=float, default=1e-4)
     parser.add_argument("--total_cycles", type=int, default=3,
                         help="For way1: how many full cycles through all layers")
-    parser.add_argument("--max-seq-length", type=int, default=128)
+    parser.add_argument("--max-seq-length", type=int, default=256)
+    parser.add_argument("--max_steps", type=int, default=-1, help="Limit number of steps per epoch for debugging")
     parser.add_argument("--no-pooler", action="store_true",
                         help="Remove pooler, use [CLS] token directly for classification")
     
@@ -660,6 +687,8 @@ def main():
         use_wandb=not args.no_wandb,
         seed=args.seed,
         no_pooler=args.no_pooler,
+        logging_steps=args.logging_steps,
+        max_steps=args.max_steps,
     )
     
     results = run_single_experiment(config)

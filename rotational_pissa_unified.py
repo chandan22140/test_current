@@ -420,22 +420,40 @@ class GivensRotationLayer(nn.Module):
         self.dimension = dimension
         self.pairs = pairs
         
+        # Pre-compute indices for vectorized scatter/gather
+        # Extract p and q indices from pairs
+        p_indices = [p for p, q in pairs if p < dimension and q < dimension]
+        q_indices = [q for p, q in pairs if p < dimension and q < dimension]
+        
+        # Register indices as buffers so they move with device but aren't params
+        self.register_buffer('p_indices', torch.tensor(p_indices, dtype=torch.long))
+        self.register_buffer('q_indices', torch.tensor(q_indices, dtype=torch.long))
+        
         # Trainable rotation angles for each pair
-        self.thetas = nn.Parameter(torch.zeros(len(pairs)))
+        self.thetas = nn.Parameter(torch.zeros(len(self.p_indices)))
     
     def forward(self) -> torch.Tensor:
-        """Construct the rotation matrix from Givens rotations."""
+        """Construct the rotation matrix from Givens rotations (Vectorized)."""
+        # Start with identity matrix
         R = torch.eye(self.dimension, device=self.thetas.device, dtype=self.thetas.dtype)
         
+        # Compute sines and cosines
         cos_thetas = torch.cos(self.thetas)
         sin_thetas = torch.sin(self.thetas)
         
-        for i, (p, q) in enumerate(self.pairs):
-            if p < self.dimension and q < self.dimension:  # Valid indices
-                R[p, p] = cos_thetas[i]
-                R[q, q] = cos_thetas[i]
-                R[p, q] = -sin_thetas[i]
-                R[q, p] = sin_thetas[i]
+        # Vectorized update using advanced indexing
+        # R[p, p] = cos(theta)
+        # R[q, q] = cos(theta)
+        # R[p, q] = -sin(theta)
+        # R[q, p] = sin(theta)
+        
+        # Diagonal elements (updates are disjoint, so no conflict)
+        R.diagonal().scatter_(0, self.p_indices, cos_thetas)
+        R.diagonal().scatter_(0, self.q_indices, cos_thetas)
+        
+        # Off-diagonal elements
+        R[self.p_indices, self.q_indices] = -sin_thetas
+        R[self.q_indices, self.p_indices] = sin_thetas
         
         return R
     

@@ -126,13 +126,14 @@ class GLUEConfig:
     pissa_alpha: float = 16.0
     orthogonality_weight: float = 1e-4
     low_rank_r: int = 4
+    total_cycles: int = 3  # For way1: how many full cycles through all layers
     
     # Training
     learning_rate: float = 2e-5
     weight_decay: float = 0.01
     epochs: int = 3
     batch_size: int = 32
-    max_seq_length: int = 128
+    max_seq_length: int = 256
     warmup_ratio: float = 0.06
     
     # Seeds for averaging
@@ -372,6 +373,7 @@ class GLUETrainer:
             method=self.config.method,
             orthogonality_reg_weight=self.config.orthogonality_weight,
             low_rank_r=self.config.low_rank_r,
+            total_cycles=self.config.total_cycles,
             init_identity=True,
             freeze_singular_values=False,
             s_dtype_fp32=True,
@@ -623,6 +625,8 @@ def main():
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--orthogonality_weight", type=float, default=1e-4)
+    parser.add_argument("--total_cycles", type=int, default=3,
+                        help="For way1: how many full cycles through all layers")
     parser.add_argument("--max-seq-length", type=int, default=128)
     parser.add_argument("--no-pooler", action="store_true",
                         help="Remove pooler, use [CLS] token directly for classification")
@@ -646,6 +650,7 @@ def main():
         model_name=args.model,
         pissa_rank=args.rank,
         orthogonality_weight=args.orthogonality_weight,
+        total_cycles=args.total_cycles,
         learning_rate=args.lr,
         weight_decay=args.weight_decay,
         epochs= args.epochs if args.task != "stsb" else 35,

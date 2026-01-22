@@ -10,10 +10,10 @@ parameters:
     value: mnli
   
   method:
-    values: ["way0"]
+    values: ["way1"]
   
   rank:
-    values: [64]
+    values: [85]
   
   lr:
     distribution: log_uniform_values
@@ -21,12 +21,10 @@ parameters:
     max: 1e-3
   
   epochs:
-    value: 10
+    value: 11
   
-  orthogonality_weight:
-    min: 0.001
-    max: 0.05
-    distribution: uniform
+  total_cycles:
+    values: [5]
 
   weight_decay:
     min: 0.00001
@@ -34,7 +32,7 @@ parameters:
     distribution: log_uniform_values
 
   batch-size:
-    values: [16]
+    values: [32]
 command:
   - ${env}
   - python

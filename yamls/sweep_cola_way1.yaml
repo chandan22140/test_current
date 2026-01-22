@@ -1,42 +1,43 @@
 program: train_glue_deberta.py
 method: bayes
-project: glue-deberta-rte
+project: glue-deberta-cola
 metric:
   name: best_metric
   goal: maximize
 
 parameters:
   task:
-    value: rte
+    value: cola
   
   method:
-    values: ["way0"]
+    values: ["way1"]
   
   rank:
-    values: [64]
+    values: [85]
   
+  # LR: narrowed based on sweep - best runs at 2e-4 to 5e-4
   lr:
     distribution: log_uniform_values
     min: 7e-5
     max: 1e-3
-
-  epochs:
-    value: 50
   
-  # 3. Orthogonality weight 
-  orthogonality_weight:
-    min: 0.001
-    max: 0.05
-    distribution: uniform
-  # 4. Weight decay 
+  # More epochs for smaller rank
+  epochs:
+    value: 20
+  
+  # Orthogonality weight - keep same range
+  total_cycles:
+    values: [5]
+
+  # Weight decay: higher range based on sweep (3e-4 to 6e-4 was best)
   weight_decay:
     min: 0.0001
     max: 0.01
     distribution: log_uniform_values
       
+  # Batch size sweep
   batch-size:
-    values: [16]  
-
+    values: [32]
 
 command:
   - ${env}

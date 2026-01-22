@@ -1,13 +1,13 @@
 program: train_glue_deberta.py
 method: bayes
-project: glue-deberta-mrpc
+project: glue-deberta-stsb
 metric:
   name: best_metric
   goal: maximize
 
 parameters:
   task:
-    value: mrpc
+    value: stsb
   
   method:
     values: ["way0"]
@@ -21,10 +21,10 @@ parameters:
     max: 1e-3
   
   rank:
-    values: [64]
+    values: [85]
   
   epochs:
-    value: 15
+    value: 25
   
   orthogonality_weight:
     min: 0.001

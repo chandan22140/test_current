@@ -1,19 +1,19 @@
 program: train_glue_deberta.py
 method: bayes
-project: glue-deberta-stsb
+project: glue-deberta-mrpc
 metric:
   name: best_metric
   goal: maximize
 
 parameters:
   task:
-    value: stsb
+    value: mrpc
   
   method:
-    values: ["way0"]
+    values: ["way1"]
   
   batch-size:
-    values: [16]
+    values: [32]
   
   lr:
     distribution: log_uniform_values
@@ -21,15 +21,13 @@ parameters:
     max: 1e-3
   
   rank:
-    values: [64]
+    values: [85]
   
   epochs:
-    value: 25
+    value: 15
   
-  orthogonality_weight:
-    min: 0.001
-    max: 0.05
-    distribution: uniform
+  total_cycles:
+    values: [5]
 
   weight_decay:
     min: 0.00001

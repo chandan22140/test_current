@@ -710,8 +710,10 @@ class RotationalLinearLayer(nn.Module):
         
         # Instead of creating all layers, we'll create them dynamically
         # Store only the current active layer - must use add_module for proper registration
-        current_u = GivensRotationLayer(self.r, self.givens_pairings[0])
-        current_v = GivensRotationLayer(self.r, self.givens_pairings[0])
+        # CRITICAL: Move to same device as U, otherwise they stay on CPU
+        device = self.U.device
+        current_u = GivensRotationLayer(self.r, self.givens_pairings[0]).to(device)
+        current_v = GivensRotationLayer(self.r, self.givens_pairings[0]).to(device)
         
         # Register as submodules so PyTorch tracks them properly
         self.add_module('current_givens_u', current_u)

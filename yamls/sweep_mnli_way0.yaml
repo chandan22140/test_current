@@ -1,29 +1,27 @@
 program: train_glue_deberta.py
 method: bayes
-project: glue-deberta-qqp
+project: glue-deberta-mnli
 metric:
   name: best_metric
   goal: maximize
 
 parameters:
   task:
-    value: qqp
+    value: mnli
   
   method:
     values: ["way0"]
   
   rank:
-    values: [64]
-    
- 
+    values: [85]
   
   lr:
     distribution: log_uniform_values
-    min: 7e-5
+    min: 1e-4
     max: 1e-3
-
+  
   epochs:
-    value: 10
+    value: 11
   
   orthogonality_weight:
     min: 0.001
@@ -36,7 +34,7 @@ parameters:
     distribution: log_uniform_values
 
   batch-size:
-    values: [16]
+    values: [32]
 command:
   - ${env}
   - python

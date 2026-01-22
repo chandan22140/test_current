@@ -645,7 +645,7 @@ def main():
         orthogonality_weight=args.orthogonality_weight,
         learning_rate=args.lr,
         weight_decay=args.weight_decay,
-        epochs= args.epochs,
+        epochs= args.epochs if args.task != "stsb" else 35,
         batch_size=args.batch_size,
         max_seq_length=args.max_seq_length,
         output_dir=args.output_dir,

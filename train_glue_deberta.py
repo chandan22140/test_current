@@ -446,8 +446,8 @@ class GLUETrainer:
     
     def train(self) -> Dict[str, float]:
         """Train the model and return final metrics."""
-        # Initialize wandb
-        if self.config.use_wandb:
+        # Initialize wandb (skip if already running from sweep agent)
+        if self.config.use_wandb and wandb.run is None:
             run_name = f"{self.config.task}_{self.config.method}_seed{self.config.seed}"
             wandb.init(
                 project=self.config.project_name,
@@ -462,6 +462,9 @@ class GLUETrainer:
                     "batch_size": self.config.batch_size,
                 },
             )
+        # If wandb.run exists (from sweep), enable logging
+        elif wandb.run is not None:
+            self.config.use_wandb = True
         
         best_metric = -float("inf")
         best_results = {}

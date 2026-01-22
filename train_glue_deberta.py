@@ -327,12 +327,14 @@ class GLUETrainer:
         # Data collator
         collator = DataCollatorWithPadding(self.tokenizer, padding=True)
         
-        # Create dataloaders
+        # Create dataloaders (with parallel loading for speed)
         self.train_loader = DataLoader(
             dataset["train"],
             batch_size=self.config.batch_size,
             shuffle=True,
             collate_fn=collator,
+            num_workers=4,
+            pin_memory=True,
         )
         
         val_key = self.task_config["validation_key"]
@@ -341,6 +343,8 @@ class GLUETrainer:
             batch_size=self.config.batch_size,
             shuffle=False,
             collate_fn=collator,
+            num_workers=4,
+            pin_memory=True,
         )
         
         # For MNLI, also load mismatched validation
@@ -350,6 +354,8 @@ class GLUETrainer:
                 batch_size=self.config.batch_size,
                 shuffle=False,
                 collate_fn=collator,
+                num_workers=4,
+                pin_memory=True,
             )
         
         print(f"  Train samples: {len(dataset['train'])}")

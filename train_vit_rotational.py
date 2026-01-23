@@ -137,6 +137,7 @@ class TrainingConfig:
     # Freezing strategy to control trainable parameter count
     freeze_backbone: bool = True            # Freeze all non-adapter params by default
     train_head: bool = True                 # Keep classifier head trainable
+    track_grad_norm: bool = False           # Whether to compute and log gradient norm
     
     @property
     def num_classes(self) -> int:
@@ -1100,8 +1101,28 @@ class ViTRotationalTrainer:
                     wandb.log({"orthogonality_loss": ortho_loss.item()}, step=global_step)
             
             # Backward pass
-            loss.backward()
+            # Gradient clipping (always performed for stability)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            
             optimizer.step()
+            
+            # Rotational PiSSA update
+            if rotational_trainer.config.method == "way1" and rotational_trainer.should_step_phase(total_steps):
+                rotational_trainer.step_phase()
+            
+            # Logging
+            if self.config.use_wandb and global_step % 10 == 0:
+                log_dict = {
+                    "train_step_loss": loss.item(),
+                    "epoch": epoch + batch_idx / len(self.train_loader),
+                    "lr": optimizer.param_groups[0]['lr']
+                }
+                
+                # Only sync/log grad norm if enabled to save speed
+                if self.config.track_grad_norm:
+                    log_dict["grad_norm"] = grad_norm.item()
+                
+                wandb.log(log_dict)
             
             # Step scheduler every step for proper warmup
             scheduler.step()

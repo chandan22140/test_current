@@ -26,7 +26,7 @@ import wandb
 import os
 
 
-def main(lora_alpha=128, lora_rank=128, sample_size=128, seed=42, resume_from_checkpoint=None):
+def main(lora_alpha=128, lora_rank=128, sample_size=128, seed=42, resume_from_checkpoint=None, track_grad_norm=False):
     accelerator = Accelerator()
     model_id = "google/gemma-7b"
     model_type = "CausalLM"
@@ -126,7 +126,8 @@ def main(lora_alpha=128, lora_rank=128, sample_size=128, seed=42, resume_from_ch
         resume_from_checkpoint=resume_from_checkpoint,
         training_args=dict(
             lr_scheduler_type="cosine",
-            max_grad_norm=1.0,
+            # If track_grad_norm is False, we disable max_grad_norm (set to 0) to skip clipping and sync overhead
+            max_grad_norm=1.0 if track_grad_norm else 0.0,
             warmup_ratio=0.03,
             weight_decay=0.0,
             torch_compile=True,

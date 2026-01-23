@@ -144,7 +144,9 @@ class GLUEConfig:
     project_name: str = "glue-deberta-rotational-pissa"
     output_dir: str = "./glue_results"
     logging_steps: int = 100
+    logging_steps: int = 100
     max_steps: int = -1
+    track_grad_norm: bool = False  # If False, skip computing/logging grad norm for speed
     
     # Model architecture
     no_pooler: bool = False  # If True, use CLS token directly instead of pooler
@@ -540,16 +542,28 @@ class GLUETrainer:
             self.optimizer.zero_grad()
             loss.backward()
             
-            # Compute gradient norm before clipping
+            # Gradient Clipping
+            # Always clip for stability, but optionally track norm
+            # If tracking is disabled, we skip the expensive .item() synchronization
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
             
             # Optimization: Only sync to CPU (item()) if we are going to log
             is_logging_step = (num_steps % self.config.logging_steps == 0)
             
             if is_logging_step:
-                grad_norm_val = grad_norm.item()
-                loss_val = loss.item()
-                total_grad_norm += grad_norm_val
+                # Efficiently handle grad norm tracking
+                if self.config.track_grad_norm:
+                    grad_norm_val = grad_norm.item()
+                    loss_val = loss.item() # Sync loss too if tracking is robust
+                    total_grad_norm += grad_norm_val
+                else:
+                    grad_norm_val = 0.0
+                    # Note: We skip total_grad_norm accumulation if not tracking to avoid mix of real/zero values
+                
+                # loss.item() is also a sync, but usually we want loss logged.
+                # Assuming user prioritized grad norm sync removal.
+                # We will still sync loss for wandb.
+                loss_val = loss.item() 
                 num_logging_steps += 1
 
             num_steps += 1

@@ -26,7 +26,7 @@ import wandb
 import os
 
 
-def main(lora_alpha=128, lora_rank=128, sample_size=128, seed=42, resume_from_checkpoint=None, track_grad_norm=False):
+def main(lora_alpha=128, lora_rank=128, sample_size=128, seed=42, resume_from_checkpoint=None, track_grad_norm=False, method="way0", total_cycles=4, epochs=1):
     accelerator = Accelerator()
     model_id = "google/gemma-7b"
     model_type = "CausalLM"
@@ -39,9 +39,10 @@ def main(lora_alpha=128, lora_rank=128, sample_size=128, seed=42, resume_from_ch
         r=lora_rank,
         s=sample_size,
         sd=seed,
+        method=method,
     )
     wandb_name = "_".join([f"{k}={v}" for k, v in config.items()])
-    # wandb_name+="newarmup"
+    # wandb_name+="way1"  # Removed hardcoded suffix, now part of config
     if accelerator.is_local_main_process:
         wandb.init(
             name=wandb_name,
@@ -61,7 +62,9 @@ def main(lora_alpha=128, lora_rank=128, sample_size=128, seed=42, resume_from_ch
         r=config["r"],
         lora_alpha=config["a"],
         # CHANGED: Add rotational PiSSA specific parameters
-        method="way0",  # Using direct optimization with regularization
+        # CHANGED: Use method argument
+        method=method,
+        total_cycles=total_cycles,  # For way1
         orthogonality_reg_weight=0,   
         init_identity=True,
         freeze_singular_values=False,
@@ -106,7 +109,7 @@ def main(lora_alpha=128, lora_rank=128, sample_size=128, seed=42, resume_from_ch
         model=model,
         tokenizer=tokenizer,
         model_type=model_type,
-        num_train_epochs=1,
+        num_train_epochs=epochs,
         per_device_batch_size=1,
         real_batch_size=128,
         bf16=(model_dtype == "bf16"),

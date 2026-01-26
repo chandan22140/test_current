@@ -1,0 +1,47 @@
+program: train_vit_rotational.py
+method: bayes  
+project: PiSSA-cifar100-butterfly-seq
+metric:
+  name: best_accuracy
+  goal: maximize
+
+parameters:
+  model_name:  # Model architecture
+    value: vit_base_patch16_224
+  
+  dataset:  # Dataset to train on
+    value: "cifar100"
+  
+  learning_rate:  # Direct config attribute
+    min: 0.0001
+    max: 0.001
+    distribution: log_uniform_values
+  
+  weight_decay:  # Direct config attribute for L2 regularization
+    min: 0.00001
+    max: 0.001
+    distribution: log_uniform_values
+    
+
+  total_cycles:
+    values: [3]
+
+  pissa_rank:  # Direct config attribute
+    values: [768]
+  
+  method:  # Direct config attribute
+    value: way1
+  
+  epochs:  # Direct config attribute
+    value: 10
+  
+  batch_size:  # Direct config attribute
+    values: [32]
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args}
+  - --use-butterfly    
+  - --butterfly-sequential

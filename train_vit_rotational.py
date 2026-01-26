@@ -109,6 +109,11 @@ class TrainingConfig:
     quantize_residual: bool = False  # Whether to NF4 quantize W_residual
     quantize_base_components: bool = False  # Whether to NF4 quantize U and V^T
     
+    # Way 1 Butterfly options
+    use_butterfly: bool = False
+    butterfly_sequential: bool = False
+    butterfly_block_size: int = 2
+    
     # Target modules for adaptation (HuggingFace ViT naming)
     target_modules: List[str] = field(default_factory=lambda: [
         "query",    # Query projection only
@@ -747,7 +752,10 @@ class ViTRotationalTrainer:
                 steps_per_phase=steps_per_phase,
                 total_cycles=self.config.total_cycles,
                 quantize_residual=self.config.quantize_residual,
-                quantize_base_components=self.config.quantize_base_components
+                quantize_base_components=self.config.quantize_base_components,
+                use_butterfly=self.config.use_butterfly,
+                butterfly_sequential=self.config.butterfly_sequential,
+                butterfly_block_size=self.config.butterfly_block_size
             )
         elif method == "way2":
             pissa_config = RotationalPiSSAConfig(
@@ -1453,6 +1461,14 @@ def main():
                        help="NF4 quantize W_residual (requires bitsandbytes)")
     parser.add_argument("--quantize-base-components", action="store_true",
                        help="NF4 quantize U and V^T (requires bitsandbytes)")
+    
+    # Butterfly parameters (Way 1)
+    parser.add_argument("--use-butterfly", action="store_true",
+                       help="Use butterfly factorization for Way 1")
+    parser.add_argument("--butterfly-sequential", action="store_true",
+                       help="Train butterfly components sequentially (requires --use-butterfly)")
+    parser.add_argument("--butterfly-block-size", type=int, default=2,
+                       help="Block size for butterfly factorization (default: 2)")
        
     # Other options
     parser.add_argument("--output-dir", type=str, default="./outputs",
@@ -1498,6 +1514,9 @@ def main():
         low_rank_r=args.low_rank_r,
         quantize_residual=args.quantize_residual,
         quantize_base_components=args.quantize_base_components,
+        use_butterfly=args.use_butterfly,
+        butterfly_sequential=args.butterfly_sequential,
+        butterfly_block_size=args.butterfly_block_size,
         
         # Other
         output_dir=args.output_dir,

@@ -25,7 +25,7 @@ parameters:
   
   weight_decay:
     min: 1e-6
-    max: 0.001
+    max: 0.01
     distribution: log_uniform_values
 
   batch-size:

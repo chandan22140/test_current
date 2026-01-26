@@ -17,15 +17,15 @@ parameters:
 
   lr:
     distribution: log_uniform_values
-    min: 0.0002
-    max: 0.0035
+    min: 0.001
+    max: 0.01
   
   epochs:
     value: 19
   
   weight_decay:
-    min: 1e-06
-    max: 0.001
+    min: 0.0001
+    max: 0.01
     distribution: log_uniform_values
 
   batch-size:

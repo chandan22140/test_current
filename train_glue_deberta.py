@@ -514,9 +514,10 @@ class GLUETrainer:
         best_metric = -float("inf")
         best_results = {}
         
+        global_step = 0
         for epoch in range(self.config.epochs):
             # Train epoch
-            train_loss, avg_grad_norm = self._train_epoch(epoch)
+            train_loss, avg_grad_norm, global_step = self._train_epoch(epoch, global_step)
             
             # Evaluate
             results = self._evaluate()
@@ -555,12 +556,12 @@ class GLUETrainer:
         
         return best_results
     
-    def _train_epoch(self, epoch: int) -> float:
-        """Train for one epoch."""
+    def _train_epoch(self, epoch: int, global_step: int = 0) -> Tuple[float, float, int]:
+        """Train for one epoch. Returns (avg_loss, avg_grad_norm, final_global_step)."""
         self.model.train()
         total_loss = torch.tensor(0.0, device=self.device)
         total_grad_norm = 0
-        num_steps = 0
+        num_steps = 0  # Local steps for average calc
         num_logging_steps = 0
         
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch + 1}")
@@ -587,7 +588,8 @@ class GLUETrainer:
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
             
             # Optimization: Only sync to CPU (item()) if we are going to log
-            is_logging_step = (num_steps % self.config.logging_steps == 0)
+            # Use global_step for logging frequency
+            is_logging_step = (global_step % self.config.logging_steps == 0)
             
             if is_logging_step:
                 # Efficiently handle grad norm tracking
@@ -606,12 +608,13 @@ class GLUETrainer:
                 num_logging_steps += 1
 
             num_steps += 1
+            global_step += 1
             
             self.optimizer.step()
             self.scheduler.step()
             
-            # Update Rotational PiSSA phase (for Way 1)
-            if self.pissa_config.method == "way1" and self.rotational_trainer.should_step_phase(num_steps):
+            # Update Rotational PiSSA phase (for Way 1) using GLOBAL step
+            if self.pissa_config.method == "way1" and self.rotational_trainer.should_step_phase(global_step):
                 self.rotational_trainer.step_phase()
             
             # Accumulate loss on GPU to avoid sync
@@ -632,7 +635,7 @@ class GLUETrainer:
         avg_loss = total_loss.item() / len(self.train_loader)
         avg_grad_norm = total_grad_norm / max(1, num_logging_steps)
         
-        return avg_loss, avg_grad_norm
+        return avg_loss, avg_grad_norm, global_step
     
     def _evaluate(self, loader=None) -> Dict[str, float]:
         """Evaluate on validation set."""

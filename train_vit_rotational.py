@@ -1107,7 +1107,7 @@ class ViTRotationalTrainer:
             optimizer.step()
             
             # Rotational PiSSA update
-            if rotational_trainer.config.method == "way1" and rotational_trainer.should_step_phase(total_steps):
+            if rotational_trainer.config.method == "way1" and rotational_trainer.should_step_phase(global_step):
                 rotational_trainer.step_phase()
             
             # Logging

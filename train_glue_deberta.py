@@ -127,6 +127,8 @@ class GLUEConfig:
     orthogonality_weight: float = 1e-4
     low_rank_r: int = 4
     total_cycles: int = 3  # For way1: how many full cycles through all layers
+    use_butterfly: bool = False  # For way1: use butterfly factorization instead of sequential Givens
+    butterfly_sequential: bool = False  # For way1 (butterfly): train components sequentially
     
     # Training
     learning_rate: float = 2e-5
@@ -370,6 +372,40 @@ class GLUETrainer:
         """Apply Rotational PiSSA to the model."""
         print(f"\nApplying Rotational PiSSA (method={self.config.method}, rank={self.config.pissa_rank})")
         
+        # Calculate adaptive steps_per_phase
+        import math
+        total_steps = len(self.train_loader) * self.config.epochs
+        
+        # Determine number of phases per cycle
+        if self.config.use_butterfly:
+            # Butterfly sequential: log2(d_padded)
+            # We need to approximate d_padded if we don't know it yet
+            # But roughly it's just log2(r) or next power of 2
+            r = self.config.pissa_rank
+            if hasattr(self.model.config, "hidden_size") and r == self.model.config.hidden_size:
+                 # If using full rank, it likely matches d_model which is often power of 2 or close
+                 pass
+            
+            d_padded = 2 ** math.ceil(math.log2(r)) if r > 0 else 1 
+            # If r is not power of 2, ButterflyRotationLayer pads it.
+            # Number of components m = log2(d_padded)
+            phases_per_cycle = int(math.log2(d_padded))
+        else:
+            # Standard sequential Givens: r-1 phases
+            phases_per_cycle = max(1, self.config.pissa_rank - 1)
+        
+        # Calculate steps per phase to fit total_cycles exactly into total_steps
+        # total_steps = steps_per_phase * phases_per_cycle * total_cycles
+        total_phases = phases_per_cycle * self.config.total_cycles
+        steps_per_phase = max(1, total_steps // total_phases)
+        
+        print(f"  Adaptive Scheduling:")
+        print(f"    Total steps: {total_steps}")
+        print(f"    Phases per cycle: {phases_per_cycle}")
+        print(f"    Total cycles: {self.config.total_cycles}")
+        print(f"    Total phases: {total_phases}")
+        print(f"    => Steps per phase: {steps_per_phase} (was default 100)")
+
         # Configure PiSSA
         pissa_config = RotationalPiSSAConfig(
             r=self.config.pissa_rank,
@@ -378,6 +414,9 @@ class GLUETrainer:
             orthogonality_reg_weight=self.config.orthogonality_weight,
             low_rank_r=self.config.low_rank_r,
             total_cycles=self.config.total_cycles,
+            steps_per_phase=steps_per_phase,
+            use_butterfly=self.config.use_butterfly,
+            butterfly_sequential=self.config.butterfly_sequential,
             init_identity=True,
             freeze_singular_values=False,
             s_dtype_fp32=True,
@@ -657,13 +696,13 @@ def main():
     
     # Model and training
     parser.add_argument("--model", type=str, default="microsoft/deberta-v3-base")
-    parser.add_argument("--rank", type=int, default=8)
+    parser.add_argument("--rank", type=int, default=None)
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--logging_steps", type=int, default=100,
                         help="Log every X steps")
-    parser.add_argument("--weight_decay", type=float, default=0.01)
+    parser.add_argument("--weight_decay", type=float, default=0.0)
     parser.add_argument("--orthogonality_weight", type=float, default=1e-4)
     parser.add_argument("--total_cycles", type=int, default=3,
                         help="For way1: how many full cycles through all layers")
@@ -671,6 +710,10 @@ def main():
     parser.add_argument("--max_steps", type=int, default=-1, help="Limit number of steps per epoch for debugging")
     parser.add_argument("--no-pooler", action="store_true",
                         help="Remove pooler, use [CLS] token directly for classification")
+    parser.add_argument("--use-butterfly", action="store_true",
+                        help="For way1: use butterfly parameterization (log(r) layers) instead of sequential Givens")
+    parser.add_argument("--butterfly-sequential", action="store_true",
+                        help="If True, train butterfly components one at a time (like Givens sequential mode)")
     
     # Seed
     parser.add_argument("--seed", type=int, default=42)
@@ -681,6 +724,21 @@ def main():
     
     args = parser.parse_args()
     
+    # Determine rank logic
+    if args.rank is None:
+        if args.use_butterfly:
+            # For butterfly, default to full rank d_model
+            try:
+                temp_config = AutoConfig.from_pretrained(args.model)
+                args.rank = temp_config.hidden_size
+                print(f"🦋 Butterfly mode: defaulting rank to d_model={args.rank}")
+            except Exception as e:
+                print(f"⚠️ Could not determine d_model from config, defaulting to 128: {e}")
+                args.rank = 128
+        else:
+            # Default for standard PiSSA
+            args.rank = 8
+
     # Create output dir
     os.makedirs(args.output_dir, exist_ok=True)
     
@@ -694,7 +752,7 @@ def main():
         total_cycles=args.total_cycles,
         learning_rate=args.lr,
         weight_decay=args.weight_decay,
-        epochs= args.epochs if args.task != "stsb" else 35,
+        epochs= args.epochs,
         batch_size=args.batch_size,
         max_seq_length=args.max_seq_length,
         output_dir=args.output_dir,
@@ -703,6 +761,8 @@ def main():
         no_pooler=args.no_pooler,
         logging_steps=args.logging_steps,
         max_steps=args.max_steps,
+        use_butterfly=args.use_butterfly,
+        butterfly_sequential=args.butterfly_sequential,
     )
     
     results = run_single_experiment(config)

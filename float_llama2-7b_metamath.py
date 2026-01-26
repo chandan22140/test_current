@@ -26,12 +26,26 @@ import wandb
 import os
 
 
-def main(lora_alpha=128, lora_rank=128, sample_size=128, seed=42, resume_from_checkpoint=None, track_grad_norm=False, method="way0", total_cycles=4, epochs=1):
+def main(lora_alpha=128, lora_rank=None, sample_size=128, seed=42, resume_from_checkpoint=None, track_grad_norm=False, method="way0", total_cycles=4, epochs=1, use_butterfly=False, butterfly_sequential=False):
     accelerator = Accelerator()
     model_id = "google/gemma-7b"
     model_type = "CausalLM"
     model_dtype = "bf16"
     dataset_name = "meta_math_full"
+
+    # Default rank logic for butterfly
+    if lora_rank is None:
+        if use_butterfly:
+            # Gemma-7b hidden size is 3072
+            # Ideally fetch via AutoConfig but hardcoding for known model_id is safe enough or fetch dynamically
+            from transformers import AutoConfig
+            config_obj = AutoConfig.from_pretrained(model_id)
+            lora_rank = config_obj.hidden_size
+            if accelerator.is_local_main_process:
+                print(f"🦋 Butterfly mode: defaulting rank to d_model={lora_rank}")
+        else:
+            lora_rank = 128
+            
     config = dict(
         model=model_id.replace("/", "_"),
         d=dataset_name,
@@ -65,6 +79,8 @@ def main(lora_alpha=128, lora_rank=128, sample_size=128, seed=42, resume_from_ch
         # CHANGED: Use method argument
         method=method,
         total_cycles=total_cycles,  # For way1
+        use_butterfly=use_butterfly,
+        butterfly_sequential=butterfly_sequential,
         orthogonality_reg_weight=0,   
         init_identity=True,
         freeze_singular_values=False,
@@ -143,15 +159,6 @@ def main(lora_alpha=128, lora_rank=128, sample_size=128, seed=42, resume_from_ch
             'pissa_config': pissa_config,
             'adapters': list(adapters.keys()),
         }, os.path.join(save_dir, "final_checkpoint.pt"))
-        
-        # CHANGED: Load model differently for rotational PiSSA
-        # Instead of PeftModel.from_pretrained, we load the state dict
-        model, tokenizer = initialize_text_to_text_model(
-            model_id, model_type, model_dtype, flash_attention=False
-        )
-        # checkpoint = torch.load(os.path.join(save_dir, "final_checkpoint.pt"), weights_only=False)
-        # model.load_state_dict(checkpoint['model_state_dict'])
-        # print(model)
 
 
 if __name__ == "__main__":

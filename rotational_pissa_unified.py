@@ -171,10 +171,13 @@ class RotationalPiSSAConfig:
     orthogonality_reg_weight: float = 1e-4      # Weight for orthogonality regularization loss (frobenius only)
     regularization_type: str = "frobenius"    # frobenius (recommended - fast), determinant, log_determinant
     
-    # Way 1 specific parameters (Sequential Givens rotations)
+    # Way 1 specific parameters (Sequential Givens rotations OR Butterfly factorization)
     n_givens_layers: Optional[int] = None        # Number of Givens layers (default: r-1)
     steps_per_phase: int = 100                   # Steps to train each Givens layer
     total_cycles: int = 3                        # Total cycles through all layers
+    use_butterfly: bool = False                  # If True, use log(r) butterfly layers instead of (r-1) Givens
+    butterfly_sequential: bool = False           # If True, train butterfly components one at a time (like Givens)
+    butterfly_block_size: int = 2                # Block size b for BOFT(m, b). b=2 gives O(r log r) params
     
     # Way 2/3 specific parameters (Low-rank methods)
     low_rank_r: int = 4                          # Low rank for B,C matrices in ways 2&3
@@ -462,6 +465,336 @@ class GivensRotationLayer(nn.Module):
         with torch.no_grad():
             self.thetas.zero_()
 
+
+class ButterflyComponent(nn.Module):
+    """
+    Single butterfly component B_tilde_b(d, k) from BOFT paper.
+    
+    This implements a block-diagonal matrix where each block is a butterfly factor BF(k).
+    For orthogonality, we parameterize each 2b×2b block as a product of Givens rotations.
+    
+    The butterfly factor structure (Equation 1 in paper):
+        BF(k) = [[diag(d1), diag(d2)],
+                 [diag(d3), diag(d4)]]
+    
+    For b=2, each 2×2 block is a Givens rotation parameterized by angle θ:
+        [[cos(θ), -sin(θ)],
+         [sin(θ),  cos(θ)]]
+    
+    Args:
+        d: Full dimension of the orthogonal matrix R
+        k: Level size (power of 2: 2, 4, 8, ..., d). Determines block arrangement.
+        block_size: Size b of the base orthogonal blocks (default 2 for Givens rotations)
+    """
+    
+    def __init__(self, d: int, k: int, block_size: int = 2):
+        super().__init__()
+        self.d = d
+        self.k = k
+        self.block_size = block_size
+        
+        # Number of butterfly factor blocks of size k along diagonal
+        self.n_blocks = d // k
+        
+        # Each butterfly factor BF(k) has k/2 Givens rotations (for b=2)
+        # arranged in a specific pattern. For b=2:
+        # - We have k/2 rotation pairs in the top-left and bottom-right
+        # - Plus k/2 rotation pairs connecting top-right and bottom-left
+        # Total: k rotations per BF(k) block
+        
+        # For block_size=2, each BF(k) needs k/2 angle parameters
+        # (each 2×2 Givens block has 1 angle)
+        self.rotations_per_block = k // 2
+        self.total_rotations = self.n_blocks * self.rotations_per_block
+        
+        # Trainable rotation angles - one per 2×2 Givens block
+        self.thetas = nn.Parameter(torch.zeros(self.total_rotations))
+        
+        # Pre-compute indices for vectorized operations
+        self._precompute_indices()
+    
+    def _precompute_indices(self):
+        """Precompute index patterns for efficient forward pass."""
+        # For each block, we need to apply Givens rotations in a butterfly pattern
+        # The pattern depends on k and creates the cross-connections
+        
+        # For butterfly component at level k:
+        # - Matrix is d×d with n_blocks = d/k butterfly factors on diagonal
+        # - Each BF(k) is k×k and connects indices in a specific pattern
+        
+        # Build index arrays for source and destination of rotations
+        p_indices = []  # First element of each rotation pair
+        q_indices = []  # Second element of each rotation pair
+        
+        for block_idx in range(self.n_blocks):
+            base_idx = block_idx * self.k
+            half_k = self.k // 2
+            
+            # Butterfly pattern: pair i with i + k/2
+            for i in range(half_k):
+                p_indices.append(base_idx + i)
+                q_indices.append(base_idx + i + half_k)
+        
+        self.register_buffer('p_indices', torch.tensor(p_indices, dtype=torch.long))
+        self.register_buffer('q_indices', torch.tensor(q_indices, dtype=torch.long))
+    
+    def forward(self) -> torch.Tensor:
+        """Construct the butterfly component matrix (for debugging/visualization).
+        
+        NOTE: For efficiency during training, use apply() instead which avoids
+        building the full O(d²) matrix.
+        """
+        # Start with identity
+        R = torch.eye(self.d, device=self.thetas.device, dtype=self.thetas.dtype)
+        
+        # Compute sin and cos for all rotations
+        cos_thetas = torch.cos(self.thetas)
+        sin_thetas = torch.sin(self.thetas)
+        
+        # Apply all Givens rotations in the butterfly pattern
+        # R[p, p] = cos(θ), R[q, q] = cos(θ)
+        # R[p, q] = -sin(θ), R[q, p] = sin(θ)
+        R.diagonal().scatter_(0, self.p_indices, cos_thetas)
+        R.diagonal().scatter_(0, self.q_indices, cos_thetas)
+        R[self.p_indices, self.q_indices] = -sin_thetas
+        R[self.q_indices, self.p_indices] = sin_thetas
+        
+        return R
+    
+    def apply(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply butterfly rotation directly to input (matrix-free, O(d) per sample).
+        
+        Computes x @ R where R is the butterfly component matrix.
+        
+        Instead of computing x @ R with a full d×d matrix, we apply the sparse
+        Givens rotations directly to x. Each Givens rotation only affects 2 elements.
+        
+        Args:
+            x: Input tensor of shape [..., d] where last dim is the rotation dimension
+               
+        Returns:
+            Rotated tensor of same shape (x @ R)
+            
+        Complexity: O(d) instead of O(d²) for matrix multiplication
+        """
+        # Compute sin and cos for all rotations
+        cos_thetas = torch.cos(self.thetas)
+        sin_thetas = torch.sin(self.thetas)
+        
+        # Clone x to avoid in-place modification issues with autograd
+        y = x.clone()
+        
+        # Extract values at p and q indices
+        # For x of shape [..., d], we index the last dimension
+        x_p = x[..., self.p_indices]  # [..., num_rotations]
+        x_q = x[..., self.q_indices]  # [..., num_rotations]
+        
+        # Apply Givens rotations: x @ [cos -sin; sin cos]
+        # For row vector x @ R:
+        # y_p = cos * x_p + sin * x_q  (row p of R.T = [cos, sin])
+        # y_q = -sin * x_p + cos * x_q (row q of R.T = [-sin, cos])
+        y[..., self.p_indices] = cos_thetas * x_p + sin_thetas * x_q
+        y[..., self.q_indices] = -sin_thetas * x_p + cos_thetas * x_q
+        
+        return y
+    
+    def apply_transpose(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply transpose of butterfly rotation: x @ R.T (matrix-free, O(d) per sample).
+        
+        For Givens rotation R = [cos, -sin; sin, cos]:
+        R.T = [cos, sin; -sin, cos]
+        
+        This is what the forward pass needs: x @ R_V.T and x @ R_U.T
+        
+        Args:
+            x: Input tensor of shape [..., d] where last dim is the rotation dimension
+               
+        Returns:
+            Rotated tensor of same shape (x @ R.T)
+            
+        Complexity: O(d) instead of O(d²) for matrix multiplication
+        """
+        # Compute sin and cos for all rotations
+        cos_thetas = torch.cos(self.thetas)
+        sin_thetas = torch.sin(self.thetas)
+        
+        # Clone x to avoid in-place modification issues with autograd
+        y = x.clone()
+        
+        # Extract values at p and q indices
+        x_p = x[..., self.p_indices]
+        x_q = x[..., self.q_indices]
+        
+        # Apply transpose of Givens rotations: x @ R.T = x @ [cos, sin; -sin, cos]
+        # For row vector x @ R.T:
+        # y_p = cos * x_p - sin * x_q  (column p of R = [cos, -sin].T)
+        # y_q = sin * x_p + cos * x_q  (column q of R = [sin, cos].T)
+        y[..., self.p_indices] = cos_thetas * x_p - sin_thetas * x_q
+        y[..., self.q_indices] = sin_thetas * x_p + cos_thetas * x_q
+        
+        return y
+    
+    def reset(self):
+        """Reset all rotation angles to zero (identity)."""
+        with torch.no_grad():
+            self.thetas.zero_()
+
+
+class ButterflyRotationLayer(nn.Module):
+    """
+    Full butterfly rotation matrix R(m, b) from BOFT paper.
+    
+    Composes m = log2(d) butterfly components to form a dense orthogonal matrix:
+        R = B_tilde(d, d) @ B_tilde(d, d/2) @ ... @ B_tilde(d, 2)
+    
+    This achieves O(d log d) parameters while producing a dense orthogonal matrix,
+    compared to O(d²) for a general orthogonal matrix.
+    
+    Key insight from paper: The butterfly structure is based on FFT's Cooley-Tukey
+    algorithm, where local changes propagate globally through log(d) levels.
+    
+    Args:
+        d: Dimension of the orthogonal matrix (should be power of 2)
+        block_size: Size b of base orthogonal blocks (default 2)
+    
+    Example:
+        For d=8, block_size=2:
+        - m = log2(8) = 3 butterfly components
+        - Levels k = 8, 4, 2
+        - Total params = d * log2(d) / 2 = 8 * 3 / 2 = 12 angles per R_U/R_V
+    """
+    
+    def __init__(self, d: int, block_size: int = 2):
+        super().__init__()
+        self.d = d
+        self.block_size = block_size
+        
+        import math  # Import at top of method for use throughout
+        
+        # Validate d is a power of 2
+        if d < 2 or (d & (d - 1)) != 0:
+            # If not power of 2, round up to nearest power of 2
+            d_padded = 2 ** math.ceil(math.log2(d))
+            print(f"Warning: d={d} is not a power of 2. Using d_padded={d_padded}")
+            self.d_padded = d_padded
+            self.needs_padding = True
+        else:
+            self.d_padded = d
+            self.needs_padding = False
+        
+        # Number of butterfly component levels
+        self.m = int(math.log2(self.d_padded))
+        
+        # Create butterfly components for levels k = d, d/2, d/4, ..., 2
+        # Following paper: R = B(d,d) @ B(d,d/2) @ ... @ B(d,2)
+        self.components = nn.ModuleList()
+        k = self.d_padded
+        while k >= 2:
+            self.components.append(ButterflyComponent(self.d_padded, k, block_size))
+            k = k // 2
+    
+    def forward(self) -> torch.Tensor:
+        """Compute the full butterfly rotation matrix R.
+        
+        Builds R = B(d,d) @ B(d,d/2) @ ... @ B(d,2) by composing all components.
+        Uses optimized cuBLAS matrix multiplication which is faster than the
+        theoretically-optimal O(d log d) apply() due to GPU parallelism.
+        """
+        # Start with identity
+        R = torch.eye(self.d_padded, device=self.components[0].thetas.device, 
+                      dtype=self.components[0].thetas.dtype)
+        
+        # Multiply all butterfly components: R = B(d,d) @ B(d,d/2) @ ... @ B(d,2)
+        for component in self.components:
+            R = R @ component()
+        
+        # If we padded, extract the d×d submatrix
+        if self.needs_padding:
+            R = R[:self.d, :self.d]
+        
+        return R
+    
+    def apply(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply butterfly rotation R to input x efficiently (matrix-free).
+        
+        Following BOFT paper insight: instead of computing x @ R where R is d×d,
+        apply each butterfly component sequentially. This reduces complexity from
+        O(d²) to O(d log d) per sample.
+        
+        Args:
+            x: Input tensor of shape [..., d] where last dim is the rotation dimension
+               
+        Returns:
+            Rotated tensor x @ R of same shape
+            
+        Complexity: O(d log d) instead of O(d²)
+        """
+        # If input dimension doesn't match d_padded, we need to handle padding
+        if self.needs_padding:
+            # Pad input to d_padded
+            pad_size = self.d_padded - self.d
+            x_padded = torch.nn.functional.pad(x, (0, pad_size), value=0)
+        else:
+            x_padded = x
+        
+        # Apply butterfly components sequentially: x @ B1 @ B2 @ ... @ Bm
+        # Since apply does x @ B_i, we chain them
+        result = x_padded
+        for component in self.components:
+            result = component.apply(result)
+        
+        # If we padded, extract the original d dimensions
+        if self.needs_padding:
+            result = result[..., :self.d]
+        
+        return result
+    
+    def apply_transpose(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply R.T to input x efficiently (matrix-free).
+        
+        Computes x @ R.T where R = B1 @ B2 @ ... @ Bm.
+        Since (B1 @ B2 @ ... @ Bm).T = Bm.T @ ... @ B2.T @ B1.T,
+        we apply component transposes in REVERSE order.
+        
+        This is what the forward pass needs: x @ R_V.T and x @ R_U.T
+        
+        Args:
+            x: Input tensor of shape [..., d] where last dim is the rotation dimension
+               
+        Returns:
+            Rotated tensor x @ R.T of same shape
+            
+        Complexity: O(d log d) instead of O(d²)
+        """
+        # If input dimension doesn't match d_padded, we need to handle padding
+        if self.needs_padding:
+            pad_size = self.d_padded - self.d
+            x_padded = torch.nn.functional.pad(x, (0, pad_size), value=0)
+        else:
+            x_padded = x
+        
+        # Apply butterfly component transposes in REVERSE order
+        # (B1 @ B2 @ ... @ Bm).T = Bm.T @ ... @ B2.T @ B1.T
+        result = x_padded
+        for component in reversed(self.components):
+            result = component.apply_transpose(result)
+        
+        # If we padded, extract the original d dimensions
+        if self.needs_padding:
+            result = result[..., :self.d]
+        
+        return result
+    
+    def reset(self):
+        """Reset all butterfly components to identity."""
+        for component in self.components:
+            component.reset()
+    
+    def get_num_parameters(self) -> int:
+        """Return the number of trainable parameters."""
+        return sum(p.numel() for p in self.parameters())
+
+
 # ============================================================================
 # MAIN ROTATIONAL PISSA LAYER
 # ============================================================================
@@ -516,8 +849,8 @@ class RotationalLinearLayer(nn.Module):
         self.scaling = 1
         # self.scaling = pissa_config.lora_alpha / pissa_config.r
         
-        # Training state for Way 1 (sequential Givens)
-        if pissa_config.method == "way1":
+        # Training state for Way 1 (sequential Givens) - not needed for butterfly mode
+        if pissa_config.method == "way1" and not pissa_config.use_butterfly:
             self.current_layer_index = 0
             self.current_cycle = 0
             self.step_count = 0
@@ -713,32 +1046,82 @@ class RotationalLinearLayer(nn.Module):
             self.R_V = nn.Parameter(Q_V)
     
     def _init_way1(self):
-        """Way 1: Greedy sequential Givens rotations with dynamic layer instantiation.
+        """Way 1: Greedy sequential Givens rotations OR Butterfly factorization.
         
-        To save VRAM, we only instantiate the current active Givens layer.
-        After training each layer, we:
-        1. Merge its rotation into U and V (in-place)
-        2. Delete the layer to free VRAM
-        3. Instantiate the next layer
+        If use_butterfly=True:
+            Uses ButterflyRotationLayer with log(r) levels for O(r log r) parameters.
+            All components trained simultaneously (no sequential phases).
+        
+        If use_butterfly=False (default):
+            Uses sequential Givens rotations with dynamic layer instantiation.
+            To save VRAM, we only instantiate the current active Givens layer.
+            After training each layer, we:
+            1. Merge its rotation into U and V (in-place)
+            2. Delete the layer to free VRAM
+            3. Instantiate the next layer
         """
-        n_layers = self.pissa_config.n_givens_layers or (self.r - 1)
-        
-        # Generate pairings for all phases (we'll instantiate layers on-demand)
-        self.givens_pairings = generate_givens_pairings(self.r, n_layers)
-        
-        # Instead of creating all layers, we'll create them dynamically
-        # Store only the current active layer - must use add_module for proper registration
-        # CRITICAL: Move to same device as U, otherwise they stay on CPU
         device = self.U.device
-        current_u = GivensRotationLayer(self.r, self.givens_pairings[0]).to(device)
-        current_v = GivensRotationLayer(self.r, self.givens_pairings[0]).to(device)
         
-        # Register as submodules so PyTorch tracks them properly
-        self.add_module('current_givens_u', current_u)
-        self.add_module('current_givens_v', current_v)
-        
-        # Note: U and V buffers will be updated in-place as we merge rotations
-        # No need for separate U_base/V_base since we modify U/V directly
+        if self.pissa_config.use_butterfly:
+            block_size = self.pissa_config.butterfly_block_size
+            
+            if self.pissa_config.butterfly_sequential:
+                # Sequential butterfly mode: train one component at a time (like Givens)
+                # Components are B(d,d), B(d,d/2), ..., B(d,2) - m = log2(d) total
+                d_padded = 2 ** math.ceil(math.log2(self.r)) if (self.r & (self.r - 1)) != 0 else self.r
+                
+                # Generate k values for all components: [d, d/2, d/4, ..., 2]
+                self.butterfly_k_values = []
+                k = d_padded
+                while k >= 2:
+                    self.butterfly_k_values.append(k)
+                    k = k // 2
+                
+                # Track padding for non-power-of-2 ranks
+                self.butterfly_d_padded = d_padded
+                self.butterfly_needs_padding = d_padded != self.r
+                
+                # Track current component and cycle
+                self.current_butterfly_idx = 0
+                self.current_butterfly_cycle = 0
+                
+                # Create first component
+                first_k = self.butterfly_k_values[0]
+                current_u = ButterflyComponent(d_padded, first_k, block_size).to(device)
+                current_v = ButterflyComponent(d_padded, first_k, block_size).to(device)
+                
+                self.add_module('current_butterfly_u', current_u)
+                self.add_module('current_butterfly_v', current_v)
+                
+                n_components = len(self.butterfly_k_values)
+                n_params = current_u.thetas.numel()
+                print(f"    🦋 Sequential Butterfly: {n_components} components, starting with B(d,{first_k}), {n_params} params/component")
+            else:
+                # Standard butterfly mode: all components trained simultaneously
+                self.butterfly_u = ButterflyRotationLayer(self.r, block_size).to(device)
+                self.butterfly_v = ButterflyRotationLayer(self.r, block_size).to(device)
+                
+                n_params_per_layer = self.butterfly_u.get_num_parameters()
+                n_levels = self.butterfly_u.m
+                print(f"    🦋 Butterfly mode: {n_levels} levels (log2({self.r})), {n_params_per_layer} params per rotation matrix")
+        else:
+            # Classic Givens mode: sequential layer training
+            n_layers = self.pissa_config.n_givens_layers or (self.r - 1)
+            
+            # Generate pairings for all phases (we'll instantiate layers on-demand)
+            self.givens_pairings = generate_givens_pairings(self.r, n_layers)
+            
+            # Instead of creating all layers, we'll create them dynamically
+            # Store only the current active layer - must use add_module for proper registration
+            current_u = GivensRotationLayer(self.r, self.givens_pairings[0]).to(device)
+            current_v = GivensRotationLayer(self.r, self.givens_pairings[0]).to(device)
+            
+            # Register as submodules so PyTorch tracks them properly
+            self.add_module('current_givens_u', current_u)
+            self.add_module('current_givens_v', current_v)
+            
+            # Note: U and V buffers will be updated in-place as we merge rotations
+            # No need for separate U_base/V_base since we modify U/V directly
     
     def _init_way2(self):
         """Way 2: Low-rank skew-symmetric perturbation I + BC^T - CB^T."""
@@ -786,8 +1169,21 @@ class RotationalLinearLayer(nn.Module):
             return self.R_U, self.R_V
         
         elif self.pissa_config.method == "way1":
-            # For Way 1, return the current active layer's rotation
-            return self.current_givens_u(), self.current_givens_v()
+            # For Way 1, check if using butterfly or classic Givens
+            if self.pissa_config.use_butterfly:
+                if self.pissa_config.butterfly_sequential:
+                    # Sequential butterfly: return current component's matrix
+                    R_U = self.current_butterfly_u()
+                    R_V = self.current_butterfly_v()
+                    # Handle padding (extract r×r submatrix if needed)
+                    if self.butterfly_needs_padding:
+                        R_U = R_U[:self.r, :self.r]
+                        R_V = R_V[:self.r, :self.r]
+                    return R_U, R_V
+                else:
+                    return self.butterfly_u(), self.butterfly_v()
+            else:
+                return self.current_givens_u(), self.current_givens_v()
         
         elif self.pissa_config.method == "way2":
             # R = I + BC^T - CB^T (skew-symmetric perturbation)
@@ -818,12 +1214,12 @@ class RotationalLinearLayer(nn.Module):
         - W_principal = U @ R_U @ S @ R_V^T @ V^T (trainable via rotations)
         
         Handles quantized U/V by dequantizing before matmul operations.
+        
+        For butterfly mode (Way 1 + use_butterfly=True), uses O(d log d) apply()
+        instead of building full O(d²) rotation matrices.
         """
         # Base layer forward pass (contains W_residual - optionally quantized)
         result = self.base_layer(x)
-        
-        # Get current rotation matrices
-        R_U, R_V = self.get_rotation_matrices()
 
         # Get U, V (dequantize if needed)
         # If U/V are Params4bit, dequantize them for use in matmul
@@ -833,17 +1229,11 @@ class RotationalLinearLayer(nn.Module):
         # Ensure all components are in same dtype as input for matmul compatibility
         # Only convert if dtype differs to avoid unnecessary overhead
         target_dtype = x.dtype
-        # print("target_dtype:", target_dtype)
-        # print("x.dtype:", x.dtype)
         
         if U_current.dtype != target_dtype:
             U_current = U_current.to(target_dtype)
         if V_current.dtype != target_dtype:
             V_current = V_current.to(target_dtype)
-        if R_U.dtype != target_dtype:
-            R_U = R_U.to(target_dtype)
-        if R_V.dtype != target_dtype:
-            R_V = R_V.to(target_dtype)
         # S is stored in FP32 for optimizer precision, convert to compute dtype
         # Note: .to() is differentiable, gradients flow back to self.S
         if self.S.dtype != target_dtype:
@@ -857,9 +1247,20 @@ class RotationalLinearLayer(nn.Module):
         # Apply the rotational transformation chain
         # Note: V is [r, in_features], so V^T is [in_features, r]
         x_adapted = x_adapted @ V_current.T  # [batch, in_features] @ [in_features, r] -> [batch, r]
+        
+        # Get rotation matrices (butterfly uses forward() which builds full matrix - 
+        # this is actually faster than apply() due to optimized cuBLAS)
+        R_U, R_V = self.get_rotation_matrices()
+        
+        if R_U.dtype != target_dtype:
+            R_U = R_U.to(target_dtype)
+        if R_V.dtype != target_dtype:
+            R_V = R_V.to(target_dtype)
+        
         x_adapted = x_adapted @ R_V.T        # [batch, r] @ [r, r] -> [batch, r]
         x_adapted = x_adapted * S_current    # [batch, r] * [r] -> [batch, r] (broadcasting)
         x_adapted = x_adapted @ R_U.T        # [batch, r] @ [r, r] -> [batch, r]
+        
         x_adapted = x_adapted @ U_current.T  # [batch, r] @ [r, out_features] -> [batch, out_features]
         
         # Scale and add W_principal to W_residual result
@@ -929,7 +1330,67 @@ class RotationalLinearLayer(nn.Module):
         """
         if self.pissa_config.method != "way1":
             return (0, 0)
+        
+        # Butterfly mode doesn't use sequential phases - all layers trained simultaneously
+        if self.pissa_config.use_butterfly and not self.pissa_config.butterfly_sequential:
+            return (0, 0)
+        
+        # Handle sequential butterfly transitions
+        if self.pissa_config.use_butterfly and self.pissa_config.butterfly_sequential:
+             # Count trainable parameters before merging
+            params_before = sum(p.numel() for p in self.parameters() if p.requires_grad)
+            
+            with torch.no_grad():
+                # Get current component matrices
+                R_U = self.current_butterfly_u()
+                R_V = self.current_butterfly_v()
+                
+                # Handle padding if needed (extract r×r submatrix)
+                if self.butterfly_needs_padding:
+                    R_U = R_U[:self.r, :self.r]
+                    R_V = R_V[:self.r, :self.r]
+                
+                # Merge into U/V in-place: U_new = U @ R_U, V_new = R_V @ V
+                self.U.copy_(self.U @ R_U)
+                self.V.copy_(R_V @ self.V)
+                
+                # Delete current components to free VRAM
+                delattr(self, 'current_butterfly_u')
+                delattr(self, 'current_butterfly_v')
 
+                # Force cleanup to ensure VRAM is available for next component
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                
+                # Advance to next component
+                self.current_butterfly_idx = (self.current_butterfly_idx + 1) % len(self.butterfly_k_values)
+                
+                # Check for cycle completion
+                if self.current_butterfly_idx == 0:
+                    self.current_butterfly_cycle += 1
+                    print(f"  ✓ Completed butterfly cycle {self.current_butterfly_cycle}/{self.pissa_config.total_cycles}")
+                
+                # Create next component
+                next_k = self.butterfly_k_values[self.current_butterfly_idx]
+                block_size = self.pissa_config.butterfly_block_size
+                device = self.U.device
+                
+                next_u = ButterflyComponent(self.butterfly_d_padded, next_k, block_size).to(device)
+                next_v = ButterflyComponent(self.butterfly_d_padded, next_k, block_size).to(device)
+                
+                # If cycles complete, just log it but don't freeze
+                if self.current_butterfly_cycle >= self.pissa_config.total_cycles:
+                     # Start of extra cycles - keep training!
+                     pass
+                
+                self.add_module('current_butterfly_u', next_u)
+                self.add_module('current_butterfly_v', next_v)
+            
+            params_after = sum(p.numel() for p in self.parameters() if p.requires_grad)
+            return (params_before, params_after)
+
+        # Standard Givens sequential training
         # Count trainable parameters before merging
         params_before = sum(p.numel() for p in self.parameters() if p.requires_grad)
 
@@ -947,6 +1408,11 @@ class RotationalLinearLayer(nn.Module):
             # Delete current Givens layers to free VRAM
             delattr(self, 'current_givens_u')
             delattr(self, 'current_givens_v')
+
+            # Force cleanup to ensure VRAM is available for next layer
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             
             # Advance to next layer
             self.current_layer_index = (self.current_layer_index + 1) % len(self.givens_pairings)
@@ -967,11 +1433,10 @@ class RotationalLinearLayer(nn.Module):
             next_u = next_u.to(device)
             next_v = next_v.to(device)
             
-            # If we've completed all cycles, freeze these layers (they won't be trained further)
+            # If we've completed all cycles, just log it but don't freeze
             if self.current_cycle >= self.pissa_config.total_cycles:
-                next_u.thetas.requires_grad = False
-                next_v.thetas.requires_grad = False
-                print(f"  ⚠️ All {self.pissa_config.total_cycles} cycles complete - subsequent layers frozen")
+                 # Start of extra cycles - keep training!
+                 pass
             
             # Register as submodules
             self.add_module('current_givens_u', next_u)

@@ -93,7 +93,7 @@ class TrainingConfig:
     batch_size: int = 64
     epochs: int = 10
     learning_rate: float = 1e-3
-    weight_decay: float = 1e-4
+    weight_decay: float = 0
     warmup_epochs: float = 1.0
     
     # Rotational PiSSA configuration

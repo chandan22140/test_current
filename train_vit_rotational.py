@@ -152,7 +152,11 @@ class TrainingConfig:
             "cifar100": 100,
             "flowers102": 102,
             "food101": 101,
-            "resisc45": 45
+            "resisc45": 45,
+            "sun397": 397,
+            "dtd": 47,
+            "fer2013": 7,
+            "fgvc_aircraft": 100,
         }
         if self.dataset not in dataset_classes:
             raise ValueError(f"Unsupported dataset: {self.dataset}. Supported: {list(dataset_classes.keys())}")
@@ -446,6 +450,134 @@ class ViTDataset:
             val_dataset = ParquetImageDataset(val_parquet, transform=temp_transform)
             test_dataset = ParquetImageDataset(test_parquet, transform=temp_transform)
 
+        elif self.config.dataset == "sun397":
+            # SUN397: Scene recognition dataset (397 classes)
+            # NOTE: torchvision SUN397 download is broken (404), use HuggingFace instead
+            try:
+                from datasets import load_dataset
+                
+                class HFImageDataset(Dataset):
+                    """Wrapper for HuggingFace image datasets."""
+                    def __init__(self, hf_dataset, transform=None, label_key='label'):
+                        self.dataset = hf_dataset
+                        self.transform = transform
+                        self.label_key = label_key
+                        # Extract labels for stratified splitting
+                        self._labels = [item[label_key] for item in hf_dataset]
+                    
+                    def __len__(self):
+                        return len(self.dataset)
+                    
+                    def __getitem__(self, idx):
+                        item = self.dataset[idx]
+                        image = item['image'].convert('RGB')
+                        label = item[self.label_key]
+                        if self.transform:
+                            image = self.transform(image)
+                        return image, label
+                
+                print("Loading SUN397 from HuggingFace...")
+                hf_sun = load_dataset("tanganke/sun397", cache_dir=self.config.data_path)
+                
+                # HF sun397 has 'train' and 'test' splits
+                if 'train' in hf_sun and 'test' in hf_sun:
+                    train_hf = HFImageDataset(hf_sun['train'], transform=temp_transform)
+                    test_hf = HFImageDataset(hf_sun['test'], transform=temp_transform)
+                    train_dataset, val_dataset = self._extract_stratified_val_split(train_hf, val_fraction=0.1)
+                    test_dataset = test_hf
+                else:
+                    # Single split, divide manually
+                    full_hf = HFImageDataset(hf_sun['train'], transform=temp_transform)
+                    train_dataset, temp_dataset = self._extract_stratified_val_split(full_hf, val_fraction=0.2)
+                    val_dataset, test_dataset = self._extract_stratified_val_split(temp_dataset, val_fraction=0.5)
+                    
+            except ImportError:
+                raise ImportError("SUN397 requires 'datasets' package. Install with: pip install datasets")
+            except Exception as e:
+                raise RuntimeError(f"Failed to load SUN397 from HuggingFace: {e}")
+
+        elif self.config.dataset == "dtd":
+            # DTD: Describable Textures Dataset (47 classes)
+            dataset_class = torchvision.datasets.DTD
+            train_dataset = dataset_class(
+                root=self.config.data_path, split='train',
+                transform=temp_transform, download=True
+            )
+            val_dataset = dataset_class(
+                root=self.config.data_path, split='val',
+                transform=temp_transform, download=True
+            )
+            test_dataset = dataset_class(
+                root=self.config.data_path, split='test',
+                transform=temp_transform, download=True
+            )
+
+        elif self.config.dataset == "fer2013":
+            # FER2013: Facial Expression Recognition (7 classes)
+            # NOTE: Use direct .pt download since HF datasets no longer supports custom scripts
+            try:
+                import pickle
+                from huggingface_hub import hf_hub_download
+                
+                class FER2013Dataset(Dataset):
+                    """Direct loader for FER2013 from HuggingFace .pt files."""
+                    LABEL_MAP = {"angry": 0, "disgust": 1, "fear": 2, "happy": 3, 
+                                 "neutral": 4, "sad": 5, "surprise": 6}
+                    
+                    def __init__(self, pt_file_path, transform=None):
+                        with open(pt_file_path, 'rb') as f:
+                            self.data = pickle.load(f)
+                        self.transform = transform
+                        # Convert string labels to integers
+                        self._labels = [self.LABEL_MAP[item['labels']] if isinstance(item['labels'], str) 
+                                        else item['labels'] for item in self.data]
+                    
+                    def __len__(self):
+                        return len(self.data)
+                    
+                    def __getitem__(self, idx):
+                        item = self.data[idx]
+                        img_bytes = item['img_bytes']
+                        image = Image.open(BytesIO(img_bytes)).convert('RGB')
+                        label = item['labels']
+                        # Convert string label to int if needed
+                        if isinstance(label, str):
+                            label = self.LABEL_MAP[label]
+                        if self.transform:
+                            image = self.transform(image)
+                        return image, label
+                
+                print("Downloading FER2013 from HuggingFace...")
+                train_pt = hf_hub_download(repo_id="Jeneral/fer-2013", filename="train.pt", 
+                                           repo_type="dataset", cache_dir=self.config.data_path)
+                test_pt = hf_hub_download(repo_id="Jeneral/fer-2013", filename="test.pt",
+                                          repo_type="dataset", cache_dir=self.config.data_path)
+                
+                train_full = FER2013Dataset(train_pt, transform=temp_transform)
+                test_dataset = FER2013Dataset(test_pt, transform=temp_transform)
+                train_dataset, val_dataset = self._extract_stratified_val_split(train_full, val_fraction=0.1)
+                    
+            except ImportError:
+                raise ImportError("FER2013 requires 'huggingface_hub' package. Install with: pip install huggingface_hub")
+            except Exception as e:
+                raise RuntimeError(f"Failed to load FER2013: {e}")
+
+        elif self.config.dataset == "fgvc_aircraft":
+            # FGVC-Aircraft: Fine-grained aircraft classification (100 variants)
+            dataset_class = torchvision.datasets.FGVCAircraft
+            train_dataset = dataset_class(
+                root=self.config.data_path, split='train',
+                transform=temp_transform, download=True
+            )
+            val_dataset = dataset_class(
+                root=self.config.data_path, split='val',
+                transform=temp_transform, download=True
+            )
+            test_dataset = dataset_class(
+                root=self.config.data_path, split='test',
+                transform=temp_transform, download=True
+            )
+
         else:
             raise ValueError(f"Unsupported dataset: {self.config.dataset}")
 
@@ -709,6 +841,7 @@ class ViTRotationalTrainer:
             num_labels=self.config.num_classes,
             ignore_mismatched_sizes=True  # Allow classifier head mismatch
         )
+        print(model)
         
         print(f"Created {self.config.model_name} with {sum(p.numel() for p in model.parameters()):,} parameters")
         print(f"Note: Using HuggingFace model with separate query/key/value projections")
@@ -726,20 +859,27 @@ class ViTRotationalTrainer:
                 quantize_base_components=self.config.quantize_base_components
             )
         elif method == "way1":
-            # Compute steps_per_phase if not explicitly set, or use config value
-            # Formula: (total_steps) / (total_cycles × num_phases_per_cycle)
-            # where num_phases_per_cycle = r - 1 (number of Givens layers per cycle)
+            # Compute steps_per_phase based on rotation type (Givens vs Butterfly)
+            import math
             total_steps = len(self.train_loader) * self.config.epochs
-            if (self.config.pissa_rank - 1) % 2 == 0:
-                num_phases_per_cycle = self.config.pissa_rank - 1
-            else:
-                num_phases_per_cycle = self.config.pissa_rank
             
-
-            # Auto-compute to fit exactly into total epochs
-            steps_per_phase = total_steps // (self.config.total_cycles * num_phases_per_cycle)
-            # Ensure at least 1 step per phase
-            steps_per_phase = max(1, steps_per_phase)
+            # Determine number of phases per cycle based on rotation type
+            if self.config.use_butterfly:
+                # Butterfly sequential: log2(d_padded) phases per cycle
+                # ButterflyRotationLayer pads rank to next power of 2
+                r = self.config.pissa_rank
+                d_padded = 2 ** math.ceil(math.log2(r)) if r > 0 else 1
+                num_phases_per_cycle = int(math.log2(d_padded))
+            else:
+                # Standard sequential Givens: r-1 phases per cycle
+                if (self.config.pissa_rank - 1) % 2 == 0:
+                    num_phases_per_cycle = self.config.pissa_rank - 1
+                else:
+                    num_phases_per_cycle = self.config.pissa_rank
+            
+            # Calculate steps per phase to fit total_cycles exactly into training
+            total_phases = num_phases_per_cycle * self.config.total_cycles
+            steps_per_phase = max(1, total_steps // total_phases)
         
             print(f"Way1 config: total_steps={total_steps}, cycles={self.config.total_cycles}, "
                   f"phases_per_cycle={num_phases_per_cycle}, steps_per_phase={steps_per_phase}")
@@ -781,29 +921,34 @@ class ViTRotationalTrainer:
             raise ValueError(f"Unknown method: {method}")
         
         # Replace linear layers with rotational adapters
-        # freeze_base_model flag handles all freezing internally (method-agnostic)
+        # CRITICAL: Exclude classifier head - it's randomly initialized and needs full training, not PiSSA adaptation
+        exclude_modules = ["classifier", "head"]  # HuggingFace ViT uses 'classifier', timm uses 'head'
+        
         adapters = replace_linear_with_rotational_pissa(
             model=model,
             pissa_config=pissa_config,
             target_modules=self.config.target_modules,
+            exclude_modules=exclude_modules,
             adapter_name="default",
             freeze_base_model=self.config.freeze_backbone  # Pass config flag
         )
         
         print(f"Created {len(adapters)} rotational adapters using {method}")
+        print(f"Excluded from PiSSA: {exclude_modules}")
         
         # Create rotational trainer helper
         rotational_trainer = RotationalPiSSATrainer(model, pissa_config)
         
-        # Optionally keep classifier head trainable (if freeze_backbone is enabled)
-        # HuggingFace ViT uses 'classifier' instead of 'head'
-        if self.config.freeze_backbone and self.config.train_head:
-            if hasattr(model, 'classifier'):
-                for p in model.classifier.parameters():
-                    p.requires_grad = True
-            elif hasattr(model, 'head'):
-                for p in model.head.parameters():
-                    p.requires_grad = True
+        # CRITICAL: Always unfreeze classifier head - it's randomly initialized!
+        # This is analogous to unfreezing the classification head in transfer learning
+        print("\n  Making classifier head fully trainable (no PiSSA):")
+        classifier_params = 0
+        for name, param in model.named_parameters():
+            if "classifier" in name or ("head" in name and "encoder" not in name):
+                param.requires_grad = True
+                classifier_params += param.numel()
+                print(f"    Unfreezing: {name} ({param.numel():,} params)")
+        print(f"  Total classifier params unfrozen: {classifier_params:,}")
         
         # Print parameter breakdown
         if self.config.freeze_backbone:
@@ -1109,14 +1254,56 @@ class ViTRotationalTrainer:
                     wandb.log({"orthogonality_loss": ortho_loss.item()}, step=global_step)
             
             # Backward pass
-            # Gradient clipping (always performed for stability)
+            loss.backward()
+            
+            # DEBUG: Check gradient flow on first few batches
+            if batch_idx < 3 and epoch == 0:
+                print(f"\n  [DEBUG] Batch {batch_idx} gradient check:")
+                # Check classifier gradients
+                if hasattr(model, 'classifier'):
+                    for name, param in model.classifier.named_parameters():
+                        if param.grad is not None:
+                            grad_norm_val = param.grad.norm().item()
+                            print(f"    classifier.{name}: grad_norm={grad_norm_val:.6f}, requires_grad={param.requires_grad}")
+                        else:
+                            print(f"    classifier.{name}: grad=None, requires_grad={param.requires_grad}")
+                
+                # Check a sample rotational adapter
+                for name, module in model.named_modules():
+                    if 'RotationalLinearLayer' in type(module).__name__:
+                        for pname, param in module.named_parameters():
+                            if param.requires_grad and param.grad is not None:
+                                print(f"    {name}.{pname}: grad_norm={param.grad.norm().item():.6f}")
+                        break  # Only check first adapter
+            
+            # Gradient clipping for stability
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             
             optimizer.step()
             
-            # Rotational PiSSA update
+            # Rotational PiSSA phase transition (Way 1 only)
             if rotational_trainer.config.method == "way1" and rotational_trainer.should_step_phase(global_step):
-                rotational_trainer.step_phase()
+                print(f"  Step {global_step}: Advancing rotation phase")
+                params_before, params_after = rotational_trainer.step_phase()
+                
+                if self.config.use_wandb:
+                    adapter = rotational_trainer.adapters[0]
+                    log_dict = {}
+                    
+                    # Add rotation layer tracking
+                    if hasattr(adapter, 'current_layer_index'):
+                        log_dict["rotation_layer_index"] = adapter.current_layer_index
+                        log_dict["rotation_cycle"] = adapter.current_cycle
+                    
+                    # Add parameter count tracking for Way1
+                    if params_before > 0:
+                        log_dict["way1/trainable_params_before"] = params_before
+                        log_dict["way1/trainable_params_after"] = params_after
+                        log_dict["way1/params_delta"] = params_after - params_before
+                        print(f"    Parameters: {params_before} → {params_after} (Δ = {params_after - params_before})")
+                    
+                    if log_dict:
+                        wandb.log(log_dict, step=global_step)
             
             # Logging
             if self.config.use_wandb and global_step % 10 == 0:
@@ -1165,29 +1352,6 @@ class ViTRotationalTrainer:
                     "train/learning_rate": current_lr,
                     "epoch": epoch
                 }, step=global_step)
-            
-            # Handle phase transitions for Way 1
-            if rotational_trainer.should_step_phase(global_step):
-                print(f"  Step {global_step}: Advancing rotation phase")
-                params_before, params_after = rotational_trainer.step_phase()
-                
-                if self.config.use_wandb:
-                    adapter = rotational_trainer.adapters[0]
-                    log_dict = {}
-                    
-                    # Add rotation layer tracking
-                    if hasattr(adapter, 'current_layer_index'):
-                        log_dict["rotation_layer_index"] = adapter.current_layer_index
-                        log_dict["rotation_cycle"] = adapter.current_cycle
-                    
-                    # Add parameter count tracking for Way1
-                    if self.config.method == "way1" and params_before > 0:
-                        log_dict["way1/trainable_params_before"] = params_before
-                        log_dict["way1/trainable_params_after"] = params_after
-                        log_dict["way1/params_delta"] = params_after - params_before
-                        print(f"    Parameters: {params_before} → {params_after} (Δ = {params_after - params_before})")
-                    
-                    wandb.log(log_dict, step=global_step)
             
             if batch_idx % 100 == 0:
                 current_acc = correct / total_samples  # Cumulative accuracy from epoch start
@@ -1419,11 +1583,10 @@ def main():
     
     # Model and dataset selection
     parser.add_argument("--model", type=str, default="google/vit-base-patch16-224",
-                       choices=["google/vit-base-patch16-224", "google/vit-large-patch16-224", 
-                               "google/vit-base-patch32-224", "google/vit-large-patch32-224"],
+                    #    choices=["google/vit-base-patch16-224", "google/vit-large-patch16-224", 
+                    #            "google/vit-base-patch32-224", "google/vit-large-patch32-224"],
                        help="ViT model architecture to use (HuggingFace model name)")
     parser.add_argument("--dataset", type=str, default="cifar100",
-                       choices=["cifar10", "cifar100", "flowers102", "food101", "resisc45"],
                        help="Dataset to train on")
     
     # Method selection
@@ -1438,6 +1601,8 @@ def main():
                        help="Batch size")
     parser.add_argument("--learning-rate", type=float, default=0.00028558,
                        help="Learning rate")
+    parser.add_argument("--weight-decay", type=float, default=0.0,
+                       help="Weight decay")
     # 0.00028558  0.001
     # Rotational PiSSA parameters
     parser.add_argument("--rank", type=int, default=16,
@@ -1498,6 +1663,7 @@ def main():
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
+        weight_decay=args.weight_decay,
         
         # Dataset
         dataset=args.dataset,

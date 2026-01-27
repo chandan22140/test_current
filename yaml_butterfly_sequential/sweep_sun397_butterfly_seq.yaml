@@ -6,36 +6,36 @@ metric:
   goal: maximize
 
 parameters:
-  model_name:  # Model architecture
-    value: vit_base_patch16_224
+  model:
+    value: google/vit-base-patch16-224
   
-  dataset:  # Dataset to train on
+  dataset:
     value: "sun397"
   
-  learning_rate:  # Direct config attribute
+  learning-rate:
     min: 0.0001
     max: 0.001
     distribution: log_uniform_values
   
-  weight_decay:  # Direct config attribute for L2 regularization
+  weight-decay:
     min: 0.00001
     max: 0.001
     distribution: log_uniform_values
     
 
-  total_cycles:
+  total-cycles:
     values: [3]
 
-  pissa_rank:  # Direct config attribute
+  rank:
     values: [768]
   
-  method:  # Direct config attribute
+  method:
     value: way1
   
-  epochs:  # Direct config attribute
+  epochs:
     value: 10
   
-  batch_size:  # Direct config attribute
+  batch-size:
     values: [32]
 
 command:

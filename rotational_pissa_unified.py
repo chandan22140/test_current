@@ -1369,7 +1369,7 @@ class RotationalLinearLayer(nn.Module):
                 # Check for cycle completion
                 if self.current_butterfly_idx == 0:
                     self.current_butterfly_cycle += 1
-                    print(f"  ✓ Completed butterfly cycle {self.current_butterfly_cycle}/{self.pissa_config.total_cycles}")
+                    # print(f"  ✓ Completed butterfly cycle {self.current_butterfly_cycle}/{self.pissa_config.total_cycles}")
                 
                 # Create next component
                 next_k = self.butterfly_k_values[self.current_butterfly_idx]

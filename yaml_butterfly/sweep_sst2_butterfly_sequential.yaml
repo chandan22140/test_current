@@ -18,7 +18,7 @@ parameters:
   lr:
     distribution: log_uniform_values
     min: 0.001
-    max: 0.1
+    max: 0.05
   
   epochs:
     value: 19

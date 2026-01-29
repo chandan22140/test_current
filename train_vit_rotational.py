@@ -44,6 +44,7 @@ sys.stderr.reconfigure(line_buffering=True)
 import argparse
 import time
 import json
+import random
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass, field
 from io import BytesIO
@@ -81,6 +82,27 @@ from vram_profiler import (
 )
 
 
+def set_seed(seed: int = 42):
+    """Set seed for full reproducibility across all random sources.
+    
+    Seeds: Python random, NumPy, PyTorch CPU, PyTorch CUDA, CUDNN.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # For multi-GPU
+    
+    # Make CUDNN deterministic (may impact performance slightly)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
+    # Set environment variable for hash seed
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    
+    print(f"🌱 Set global seed to {seed} for reproducibility")
+
+
 @dataclass
 class TrainingConfig:
     """Configuration for ViT training with rotational PiSSA."""
@@ -114,6 +136,9 @@ class TrainingConfig:
     butterfly_sequential: bool = False
     butterfly_block_size: int = 2
     
+    # LoRA+ style learning rate ratio for S vs R
+    lr_ratio_s: float = 10.0  # S params get lr * lr_ratio_s (like LoRA+ B matrix)
+    
     # Target modules for adaptation (HuggingFace ViT naming)
     target_modules: List[str] = field(default_factory=lambda: [
         "query",    # Query projection only
@@ -138,6 +163,9 @@ class TrainingConfig:
     
     # Device configuration
     device: str = "auto"  # auto, cuda, cpu
+    
+    # Reproducibility
+    seed: int = 42  # Random seed for reproducibility
     
     # Freezing strategy to control trainable parameter count
     freeze_backbone: bool = True            # Freeze all non-adapter params by default
@@ -629,24 +657,38 @@ class ViTDataset:
             print(f"Applied balanced sampling to training set")
         
         # ========== 5. Create dataloaders ==========
+        # Worker init fn for reproducible data loading
+        def seed_worker(worker_id):
+            worker_seed = torch.initial_seed() % 2**32
+            np.random.seed(worker_seed)
+            random.seed(worker_seed)
+        
+        # Generator for reproducible shuffling
+        g = torch.Generator()
+        g.manual_seed(self.config.seed)
+        
         if train_sampler is not None:
             train_loader = DataLoader(
                 train_dataset, batch_size=self.config.batch_size,
-                sampler=train_sampler, num_workers=self.config.num_workers, pin_memory=True
+                sampler=train_sampler, num_workers=self.config.num_workers, pin_memory=True,
+                worker_init_fn=seed_worker, generator=g
             )
         else:
             train_loader = DataLoader(
                 train_dataset, batch_size=self.config.batch_size,
-                shuffle=True, num_workers=self.config.num_workers, pin_memory=True
+                shuffle=True, num_workers=self.config.num_workers, pin_memory=True,
+                worker_init_fn=seed_worker, generator=g
             )
 
         val_loader = DataLoader(
             val_dataset, batch_size=self.config.batch_size,
-            shuffle=False, num_workers=self.config.num_workers, pin_memory=True
+            shuffle=False, num_workers=self.config.num_workers, pin_memory=True,
+            worker_init_fn=seed_worker
         )
         test_loader = DataLoader(
             test_dataset, batch_size=self.config.batch_size,
-            shuffle=False, num_workers=self.config.num_workers, pin_memory=True
+            shuffle=False, num_workers=self.config.num_workers, pin_memory=True,
+            worker_init_fn=seed_worker
         )
 
         return train_loader, val_loader, test_loader
@@ -1009,10 +1051,43 @@ class ViTRotationalTrainer:
             print('No classifier/head attribute found')
 
 
-        # Setup optimizer
+        # Setup optimizer with LoRA+ style LR (higher LR for S than R/thetas)
+        # Separate parameters into groups: rotation params (R/thetas), S params, classifier head
+        rotation_params = []  # R_U, R_V, thetas, B_U, B_V, C_U, C_V
+        s_params = []
+        head_params = []
+        other_params = []
+        
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            if 'classifier' in name or ('head' in name and 'encoder' not in name):
+                head_params.append(param)
+            elif '.S' in name or name.endswith('.S'):
+                s_params.append(param)
+            elif any(p in name for p in ['.thetas', '.R_U', '.R_V', '.B_U', '.B_V', '.C_U', '.C_V']):
+                rotation_params.append(param)
+            else:
+                other_params.append(param)
+        
+        print(f"\nOptimizer param groups (LoRA+ style):")
+        print(f"  Rotation params (thetas/R): {sum(p.numel() for p in rotation_params):,} (lr={self.config.learning_rate})")
+        print(f"  S params: {sum(p.numel() for p in s_params):,} (lr={self.config.learning_rate * self.config.lr_ratio_s})")
+        print(f"  Head params: {sum(p.numel() for p in head_params):,} (lr={self.config.learning_rate})")
+        print(f"  Other params: {sum(p.numel() for p in other_params):,} (lr={self.config.learning_rate})")
+        
+        param_groups = []
+        if rotation_params:
+            param_groups.append({'params': rotation_params, 'lr': self.config.learning_rate})
+        if s_params:
+            param_groups.append({'params': s_params, 'lr': self.config.learning_rate * self.config.lr_ratio_s})
+        if head_params:
+            param_groups.append({'params': head_params, 'lr': self.config.learning_rate})
+        if other_params:
+            param_groups.append({'params': other_params, 'lr': self.config.learning_rate})
+        
         optimizer = torch.optim.AdamW(
-            [p for p in model.parameters() if p.requires_grad],
-            lr=self.config.learning_rate,
+            param_groups,
             weight_decay=self.config.weight_decay
         )
 
@@ -1317,7 +1392,7 @@ class ViTRotationalTrainer:
                 if self.config.track_grad_norm:
                     log_dict["grad_norm"] = grad_norm.item()
                 
-                wandb.log(log_dict)
+                wandb.log(log_dict, step=global_step)
             
             # Step scheduler every step for proper warmup
             scheduler.step()
@@ -1634,6 +1709,8 @@ def main():
                        help="Train butterfly components sequentially (requires --use-butterfly)")
     parser.add_argument("--butterfly-block-size", type=int, default=2,
                        help="Block size for butterfly factorization (default: 2)")
+    parser.add_argument("--lr-ratio-s", type=float, default=10.0,
+                       help="Learning rate multiplier for S params vs R params (LoRA+ style, default: 10.0)")
        
     # Other options
     parser.add_argument("--output-dir", type=str, default="./outputs",
@@ -1651,8 +1728,13 @@ def main():
                        help="K-shot learning: limit to k samples per class (with upsampling if needed)")
     parser.add_argument("--use-dataset-stats", action="store_true",
                        help="Compute normalization mean/std from training data instead of using ImageNet defaults")
+    parser.add_argument("--seed", type=int, default=42,
+                       help="Random seed for reproducibility (default: 42)")
     
     args = parser.parse_args()
+    
+    # Set global seed for reproducibility
+    set_seed(args.seed)
 
     # Create configuration
     train_config = TrainingConfig(
@@ -1683,6 +1765,7 @@ def main():
         use_butterfly=args.use_butterfly,
         butterfly_sequential=args.butterfly_sequential,
         butterfly_block_size=args.butterfly_block_size,
+        lr_ratio_s=args.lr_ratio_s,
         
         # Other
         output_dir=args.output_dir,
@@ -1690,7 +1773,8 @@ def main():
         experiment_name=args.experiment_name,
         device=args.device,
         k_shot=args.k_shot,
-        use_dataset_stats=args.use_dataset_stats
+        use_dataset_stats=args.use_dataset_stats,
+        seed=args.seed
     )
     print("config.use_wandb", train_config.use_wandb)
     print("args.sweep", args.sweep)

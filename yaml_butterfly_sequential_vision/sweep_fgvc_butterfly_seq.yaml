@@ -1,6 +1,6 @@
 program: train_vit_rotational.py
 method: bayes  
-project: PiSSA-fer-butterfly-seq
+project: PiSSA-fgvc-butterfly-seq
 metric:
   name: best_accuracy
   goal: maximize
@@ -10,17 +10,20 @@ parameters:
     value: google/vit-base-patch16-224
   
   dataset:
-    value: "fer"
+    value: "fgvc"
   
   learning-rate:
     min: 0.0001
-    max: 0.001
+    max: 0.05
     distribution: log_uniform_values
   
   weight-decay:
     min: 0.00001
-    max: 0.001
+    max: 0.05
     distribution: log_uniform_values
+  
+  lr-ratio-s:
+    value: 10.0
     
 
   total-cycles:
@@ -33,7 +36,7 @@ parameters:
     value: way1
   
   epochs:
-    value: 10
+    value: 30
   
   batch-size:
     values: [32]

@@ -1,6 +1,6 @@
 program: train_vit_rotational.py
-method: bayes  
-project: PiSSA-fer-butterfly-seq
+method: bayes
+project: PiSSA-dtd-way1
 metric:
   name: best_accuracy
   goal: maximize
@@ -10,7 +10,7 @@ parameters:
     value: google/vit-base-patch16-224
   
   dataset:
-    value: "fer2013"
+    value: "dtd"
   
   learning-rate:
     min: 0.0001
@@ -30,13 +30,13 @@ parameters:
     values: [3]
 
   rank:
-    values: [768]
+    values: [16]
   
   method:
     value: way1
   
   epochs:
-    value: 10
+    value: 40
   
   batch-size:
     values: [32]
@@ -46,5 +46,3 @@ command:
   - python
   - ${program}
   - ${args}
-  - --use-butterfly    
-  - --butterfly-sequential

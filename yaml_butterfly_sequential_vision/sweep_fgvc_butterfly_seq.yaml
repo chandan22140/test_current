@@ -10,7 +10,7 @@ parameters:
     value: google/vit-base-patch16-224
   
   dataset:
-    value: "fgvc"
+    value: "fgvc_aircraft"
   
   learning-rate:
     min: 0.0001

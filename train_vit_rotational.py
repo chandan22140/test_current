@@ -1237,6 +1237,14 @@ class ViTRotationalTrainer:
                   f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, "
                   f"Best Acc: {best_acc:.4f}")
         
+        # Load best model for test evaluation
+        if self.config.save_checkpoints:
+            checkpoint_path = os.path.join(self.config.output_dir, f"{method}_best_model.pth")
+            if os.path.exists(checkpoint_path):
+                print(f"\nLoading best model from {checkpoint_path} for test evaluation...")
+                checkpoint = torch.load(checkpoint_path)
+                model.load_state_dict(checkpoint['model_state_dict'])
+
         # Evaluate on unseen test set and log
         test_acc, test_loss = self._evaluate_on_loader(model, self.test_loader)
         

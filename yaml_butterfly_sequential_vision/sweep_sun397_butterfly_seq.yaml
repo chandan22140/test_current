@@ -18,9 +18,10 @@ parameters:
     distribution: log_uniform_values
   
   weight-decay:
-    min: 0.00001
-    max: 0.05
-    distribution: log_uniform_values
+    # min: 0.00001
+    # max: 0.05
+    # distribution: log_uniform_values
+    values: [0.000547]
   
   lr-ratio-s:
     value: 10.0
@@ -36,7 +37,7 @@ parameters:
     value: way1
   
   epochs:
-    value: 10
+    value: 20
   
   batch-size:
     values: [32]

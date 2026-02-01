@@ -256,9 +256,10 @@ class ViTDataset:
         # Define standard augmentations for training (normalization added later)
         self.train_transform_base = transforms.Compose([
             transforms.Resize((config.image_size, config.image_size)),
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomRotation(10),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+            # transforms.RandomHorizontalFlip(p=0.5),
+            # transforms.RandomRotation(10),
+            # transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+            transforms.RandAugment(num_ops=2, magnitude=9),
             transforms.ToTensor()
         ])
         
@@ -1325,7 +1326,7 @@ class ViTRotationalTrainer:
                 ortho_loss = rotational_trainer.get_orthogonality_loss()
                 loss = loss + ortho_loss
                 
-                if batch_idx % 10 == 0 and self.config.use_wandb:
+                if batch_idx % 100 == 0 and self.config.use_wandb:
                     wandb.log({"orthogonality_loss": ortho_loss.item()}, step=global_step)
             
             # Backward pass
@@ -1381,7 +1382,7 @@ class ViTRotationalTrainer:
                         wandb.log(log_dict, step=global_step)
             
             # Logging
-            if self.config.use_wandb and global_step % 10 == 0:
+            if self.config.use_wandb and global_step % 100 == 0:
                 log_dict = {
                     "train_step_loss": loss.item(),
                     "epoch": epoch + batch_idx / len(self.train_loader),
@@ -1419,8 +1420,8 @@ class ViTRotationalTrainer:
             recent_losses.append(loss.item())
             recent_accs.append(batch_acc)
             
-            # Log metrics to wandb every 10 steps
-            if self.config.use_wandb and batch_idx % 10 == 0:
+            # Log metrics to wandb every 100 steps
+            if self.config.use_wandb and batch_idx % 100 == 0:
                 wandb.log({
                     "train/batch_loss": loss.item(),
                     "train/batch_acc": batch_acc,

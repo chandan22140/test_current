@@ -1420,7 +1420,7 @@ class RotationalLinearLayer(nn.Module):
             # Check if we completed a full cycle
             if self.current_layer_index == 0:
                 self.current_cycle += 1
-                print(f"  ✓ Completed cycle {self.current_cycle}/{self.pissa_config.total_cycles}")
+                # print(f"  ✓ Completed cycle {self.current_cycle}/{self.pissa_config.total_cycles}")
             
             # ALWAYS instantiate next Givens layer (prevents AttributeError in forward/validation)
             # Even after all cycles complete, we need layers for forward pass

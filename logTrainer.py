@@ -44,7 +44,7 @@ class LogTrainer(Trainer):
         data_collator: Optional[DataCollator] = None,
         train_dataset: Optional[Dataset] = None,
         eval_dataset: Optional[Union[Dataset, Dict[str, Dataset]]] = None,
-        tokenizer: Optional[PreTrainedTokenizerBase] = None,
+        processing_class: Optional[PreTrainedTokenizerBase] = None,
         model_init: Optional[Callable[[], PreTrainedModel]] = None,
         compute_metrics: Optional[Callable[[EvalPrediction], Dict]] = None,
         callbacks: Optional[List[TrainerCallback]] = None,
@@ -66,7 +66,7 @@ class LogTrainer(Trainer):
             data_collator=data_collator,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
-            tokenizer=tokenizer,
+            processing_class=processing_class,
             model_init=model_init,
             compute_metrics=compute_metrics,
             callbacks=callbacks,
@@ -274,6 +274,9 @@ class LogTrainer(Trainer):
         self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]], num_items_in_batch=None
     ) -> torch.Tensor:
         """Training step with orthogonality regularization for rotational PiSSA."""
+        if torch.cuda.is_available():
+             torch.cuda.reset_peak_memory_stats()
+
         model.train()
         inputs = self._prepare_inputs(inputs)
 
@@ -306,10 +309,18 @@ class LogTrainer(Trainer):
                 
                 # Log orthogonality loss
                 if self.state.global_step % self.args.logging_steps == 0:
+                    mem_metrics = {}
+                    if torch.cuda.is_available():
+                        mem_metrics = {
+                            "gpu/peak_memory_mb": torch.cuda.max_memory_allocated() / 1024**2,
+                            "gpu/current_memory_mb": torch.cuda.memory_allocated() / 1024**2,
+                        }
+                    
                     wandb.log({
                         "train/ortho_loss": ortho_loss.item(),
                         "train/task_loss": loss.item(),
                         "train/total_loss": total_loss.item(),
+                        **mem_metrics,
                     }, commit=False)
 
                     # print(f"[DEBUG] ortho_loss={ortho_loss.item():.6f}, task_loss={loss.item():.6f}")

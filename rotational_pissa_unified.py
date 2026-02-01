@@ -1446,6 +1446,7 @@ class RotationalLinearLayer(nn.Module):
         params_after = sum(p.numel() for p in self.parameters() if p.requires_grad)
         
         return (params_before, params_after)
+        
     def get_trainable_parameters(self) -> Dict[str, torch.Tensor]:
         """Get all trainable parameters in this adapter.
         
@@ -1693,8 +1694,9 @@ def replace_linear_with_rotational_pissa(
     target_modules: Optional[List[str]] = None,
     exclude_modules: Optional[List[str]] = None,
     adapter_name: str = "default",
-    freeze_base_model: bool = True
-) -> Dict[str, RotationalLinearLayer]:
+    freeze_base_model: bool = True,
+    device: Optional[torch.device] = None,
+) -> Dict[str, nn.Module]:
     """
     Replace Linear layers in a model with RotationalLinearLayer.
     
@@ -1713,9 +1715,8 @@ def replace_linear_with_rotational_pissa(
         exclude_modules: List of module names to exclude (e.g., ["pooler", "classifier"])
         adapter_name: Name of the adapter
         freeze_base_model: If True, freeze all model params except adapter trainable params
-    
-    Returns:
-        Dictionary mapping module names to created adapters
+        device: Optional[torch.device] = None. Explicitly specify target device for SVD ops.
+               If None, defaults to current CUDA device or weight device.
     """
     import gc
     
@@ -1788,9 +1789,13 @@ def replace_linear_with_rotational_pissa(
             # DIAGNOSTIC: Verify GPU is available and being used
             print(f"    Device: {original_device}, dtype: {original_dtype}")
             if not original_device.type == 'cuda':
-                print(f"    WARNING: Weights are on {original_device}, not CUDA! Moving to GPU...")
-                # Use current CUDA device (respects CUDA_VISIBLE_DEVICES)
-                original_device = torch.device(f'cuda:{torch.cuda.current_device()}')
+                if device is not None:
+                     print(f"    Moving weights from {original_device} to explicit device {device}...")
+                     original_device = device
+                else:
+                    print(f"    WARNING: Weights are on {original_device}, not CUDA! Moving to GPU...")
+                    # Use current CUDA device (respects CUDA_VISIBLE_DEVICES)
+                    original_device = torch.device(f'cuda:{torch.cuda.current_device()}')
             
             # Estimate memory required for this batch
             out_feat, in_feat = shape

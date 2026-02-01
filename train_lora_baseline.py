@@ -39,12 +39,12 @@ def parse_args():
     parser = argparse.ArgumentParser(description="LoRA Fine-tuning for Llama-2-7B")
     
     # Model
-    parser.add_argument("--model", type=str, default="meta-llama/Llama-2-7b-hf",
+    parser.add_argument("--model", type=str, default="google/gemma-7b",
                         help="Model name or path")
     
     # LoRA
-    parser.add_argument("--rank", type=int, default=2,
-                        help="LoRA rank (default: 2)")
+    parser.add_argument("--rank", type=int, default=8,
+                        help="LoRA rank (default: 8)")
     parser.add_argument("--alpha", type=float, default=16.0,
                         help="LoRA alpha (default: 16.0)")
     parser.add_argument("--dropout", type=float, default=0.0,
@@ -177,10 +177,10 @@ def setup_model_and_tokenizer(model_name, lora_rank, lora_alpha, lora_dropout):
         tokenizer.pad_token = tokenizer.eos_token
         tokenizer.pad_token_id = tokenizer.eos_token_id
     
-    # Load model in fp16
+    # Load model in bf16
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.float16,
+        torch_dtype=torch.bfloat16,
         device_map="auto",
         trust_remote_code=True,
     )
@@ -286,7 +286,14 @@ def train(args):
     
     # Train
     print("\n🚀 Starting training...")
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+    
     trainer.train()
+    
+    if torch.cuda.is_available():
+        peak_memory = torch.cuda.max_memory_allocated() / (1024 ** 3)
+        print(f"\n⚡ Peak VRAM usage: {peak_memory:.2f} GB")
     
     # Save model
     print(f"\n💾 Saving model to {args.output_dir}")

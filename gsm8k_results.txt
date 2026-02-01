@@ -1,0 +1,5 @@
+Model	eval_seed	temperature	accuracy
+/home/chandan/test_current/results/peft_test/model=google_gemma-7b_d=meta_math_full_a=128_r=128_s=128_sd=42-14/merged_checkpoint	42	0.0	0.7498104624715694
+/home/chandan/test_current/results/peft_test/model=google_gemma-7b_d=meta_math_full_a=128_r=128_s=128_sd=42-14/merged_checkpoint	42	0.1	0.7323730098559514
+/home/chandan/test_current/results/peft_test/model=google_gemma-7b_d=meta_math_full_a=128_r=128_s=128_sd=42_method=way0-14/42/checkpoint-8892/merged_checkpoint	0	0.0	0.7649734647460197
+/home/chandan/test_current/results/peft_test/model=google_gemma-7b_d=meta_math_full_a=128_r=128_s=128_sd=42_method=way0-14/42/checkpoint-8892/merged_checkpoint	0	0.1	0.7399545109931767

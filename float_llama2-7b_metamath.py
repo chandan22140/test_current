@@ -54,8 +54,13 @@ def main(lora_alpha=128, lora_rank=None, sample_size=128, seed=42, resume_from_c
         s=sample_size,
         sd=seed,
         method=method,
+        butterfly=use_butterfly,
+        seq=butterfly_sequential,
     )
     wandb_name = "_".join([f"{k}={v}" for k, v in config.items()])
+    if butterfly_sequential:
+         wandb_name = "butterfly_seq_" + wandb_name
+    
     # wandb_name+="way1"  # Removed hardcoded suffix, now part of config
     if accelerator.is_local_main_process:
         wandb.init(
@@ -103,6 +108,7 @@ def main(lora_alpha=128, lora_rank=None, sample_size=128, seed=42, resume_from_c
         target_modules=find_all_linear_modules(model=model),
         adapter_name="default",
         freeze_base_model=True,
+        device=accelerator.device, 
     )
 
     save_dir = os.path.join("./snapshot", wandb_name)

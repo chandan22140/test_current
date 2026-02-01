@@ -1239,7 +1239,8 @@ class ViTRotationalTrainer:
         
         # Load best model for test evaluation
         if self.config.save_checkpoints:
-            checkpoint_path = os.path.join(self.config.output_dir, f"{method}_best_model.pth")
+            save_dir = self._get_save_dir(method)
+            checkpoint_path = os.path.join(save_dir, f"{method}_best_model.pth")
             if os.path.exists(checkpoint_path):
                 print(f"\nLoading best model from {checkpoint_path} for test evaluation...")
                 checkpoint = torch.load(checkpoint_path)
@@ -1481,9 +1482,31 @@ class ViTRotationalTrainer:
         avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
         return accuracy, avg_loss
     
+    def _get_save_dir(self, method: str) -> str:
+        """Get the directory for saving/loading results for a specific method."""
+        # Determine subfolder name
+        subfolder_name = "default_run"
+        if wandb.run and wandb.run.name:
+            subfolder_name = wandb.run.name
+        elif self.config.experiment_name:
+            subfolder_name = self.config.experiment_name
+        else:
+            # Fallback: create descriptive name from config
+            base_model = self.config.model_name.replace("/", "_")
+            subfolder_name = f"{self.config.dataset}_{base_model}_{method}"
+            if self.config.use_butterfly:
+                subfolder_name += "_butterfly"
+                if self.config.butterfly_sequential:
+                    subfolder_name += "_seq"
+        
+        # Create output directory with subfolder
+        save_dir = os.path.join(self.config.output_dir, subfolder_name)
+        return save_dir
+
     def _save_checkpoint(self, model, method, epoch, accuracy):
         """Save model checkpoint."""
-        os.makedirs(self.config.output_dir, exist_ok=True)
+        save_dir = self._get_save_dir(method)
+        os.makedirs(save_dir, exist_ok=True)
         
         checkpoint = {
             "method": method,
@@ -1494,7 +1517,7 @@ class ViTRotationalTrainer:
         }
         
         filename = f"{method}_best_model.pth"
-        filepath = os.path.join(self.config.output_dir, filename)
+        filepath = os.path.join(save_dir, filename)
         torch.save(checkpoint, filepath)
         print(f"  Saved checkpoint: {filepath}")
     

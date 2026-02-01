@@ -10,5 +10,5 @@ export CUDA_VISIBLE_DEVICES=0,1
 # --num_processes 2: Use 2 GPUs
 # --mixed_precision bf16: Optional but recommended if supported
 accelerate launch \
-    --config_file fsdp_config.yaml \
+    --config_file deepspeed_config.yaml \
     float_llama2-7b_metamath.py --method way1 --total_cycles 7 --epochs 3 --use-butterfly --butterfly-sequential "$@"

@@ -98,18 +98,26 @@ def main(lora_alpha=128, lora_rank=None, sample_size=128, seed=42, resume_from_c
 
     if accelerator.is_local_main_process:
         print(pissa_config)
+        print("model:", model)
+        # print(val_set)
     
     # CHANGED: Use replace_linear_with_rotational_pissa instead of get_peft_model
     # Note: PiSSA doesn't use gradient-guided initialization like LoRA-GA
     # The SVD decomposition inherently captures the weight structure
+    # 
+    # Each rank does SVD on its own GPU (accelerator.device) to avoid contention.
+    # SVD is deterministic - both ranks get identical results from identical inputs.
+    # DeepSpeed will sync parameters during Trainer initialization.
+    print(f"[Rank {accelerator.process_index}] Starting SVD initialization on {accelerator.device}...")
     adapters = replace_linear_with_rotational_pissa(
         model=model,
         pissa_config=pissa_config,
         target_modules=find_all_linear_modules(model=model),
         adapter_name="default",
         freeze_base_model=True,
-        device=accelerator.device, 
+        device=accelerator.device,  # Each rank uses its own GPU
     )
+    print(f"[Rank {accelerator.process_index}] SVD initialization complete.")
 
     save_dir = os.path.join("./snapshot", wandb_name)
     if accelerator.is_local_main_process:
@@ -123,6 +131,10 @@ def main(lora_alpha=128, lora_rank=None, sample_size=128, seed=42, resume_from_c
             'adapters': list(adapters.keys()),
         }, os.path.join(save_dir, "init_checkpoint.pt"))
     print("finish replace_linear_with_rotational_pissa=================================================")
+    
+    # Note: No explicit barrier needed here - DeepSpeed Trainer handles 
+    # synchronization internally when it wraps the model for distributed training.
+    # The low kernel version (5.4.0) makes NCCL barriers unreliable anyway.
 
     model = train_text_to_text_model(
         run_name=os.path.join("peft_test", wandb_name),
@@ -155,7 +167,7 @@ def main(lora_alpha=128, lora_rank=None, sample_size=128, seed=42, resume_from_c
             max_grad_norm=1.0 if track_grad_norm else 0.0,
             warmup_ratio=0.03,
             weight_decay=0.0,
-            torch_compile=True,
+            torch_compile=False,  # Disabled: inductor adds significant memory overhead
         ),
     )
     if accelerator.is_local_main_process:

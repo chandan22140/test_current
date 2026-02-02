@@ -39,6 +39,15 @@ import numpy as np
 from typing import Optional, Dict, Any, Literal, Union, List, Tuple
 from dataclasses import dataclass, field
 
+# DeepSpeed ZeRO-3 support for gathering sharded weights
+try:
+    import deepspeed
+    from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+    HAS_DEEPSPEED = True
+except ImportError:
+    HAS_DEEPSPEED = False
+    deepspeed = None
+
 
 # ============================================================================
 # MEMORY-EFFICIENT TENSOR UTILITIES
@@ -109,6 +118,50 @@ def to_free(
     
     return new_tensor
 
+
+def gather_zero3_weights(modules: List[nn.Module], device: torch.device) -> torch.Tensor:
+    """
+    Gather weights from modules that may be sharded with ZeRO-3.
+    
+    With ZeRO Stage 3, model weights are partitioned across GPUs. Accessing
+    module.weight.data directly returns only the local shard (with shape [out, 0]
+    on non-primary ranks). This function gathers the full weights.
+    
+    Args:
+        modules: List of nn.Linear modules to gather weights from
+        device: Target device for the stacked weights
+        
+    Returns:
+        Stacked weight tensor of shape [num_modules, out_features, in_features]
+    """
+    weights = []
+    
+    if HAS_DEEPSPEED and deepspeed is not None:
+        # Check if any module has ZeRO-3 partitioned params
+        params_to_gather = [m.weight for m in modules]
+        
+        # Check if params are ZeRO-3 partitioned (have ds_status attribute)
+        is_zero3 = any(
+            hasattr(p, 'ds_status') and p.ds_status == ZeroParamStatus.NOT_AVAILABLE
+            for p in params_to_gather
+        )
+        
+        if is_zero3:
+            # Gather all weights in a single context (more efficient than per-weight)
+            with deepspeed.zero.GatheredParameters(params_to_gather, modifier_rank=None):
+                for m in modules:
+                    # Clone the gathered weight to keep it after context exits
+                    weights.append(m.weight.data.clone().to(device))
+        else:
+            # Params are not ZeRO-3 partitioned, access directly
+            for m in modules:
+                weights.append(m.weight.data.to(device))
+    else:
+        # No DeepSpeed, access weights directly
+        for m in modules:
+            weights.append(m.weight.data.to(device))
+    
+    return torch.stack(weights)
 
 def to_free_inplace(
     obj: object,
@@ -561,7 +614,7 @@ class ButterflyComponent(nn.Module):
         
         return R
     
-    def apply(self, x: torch.Tensor) -> torch.Tensor:
+    def apply_rotation(self, x: torch.Tensor) -> torch.Tensor:
         """Apply butterfly rotation directly to input (matrix-free, O(d) per sample).
         
         Computes x @ R where R is the butterfly component matrix.
@@ -714,7 +767,7 @@ class ButterflyRotationLayer(nn.Module):
         
         return R
     
-    def apply(self, x: torch.Tensor) -> torch.Tensor:
+    def apply_rotation(self, x: torch.Tensor) -> torch.Tensor:
         """Apply butterfly rotation R to input x efficiently (matrix-free).
         
         Following BOFT paper insight: instead of computing x @ R where R is d×d,
@@ -741,7 +794,7 @@ class ButterflyRotationLayer(nn.Module):
         # Since apply does x @ B_i, we chain them
         result = x_padded
         for component in self.components:
-            result = component.apply(result)
+            result = component.apply_rotation(result)
         
         # If we padded, extract the original d dimensions
         if self.needs_padding:
@@ -827,11 +880,15 @@ class RotationalLinearLayer(nn.Module):
         self.base_layer = base_layer
         self.pissa_config = pissa_config
         self.adapter_name = adapter_name
-        self.r = pissa_config.r
         
         # Store base layer properties
         self.in_features = base_layer.in_features
         self.out_features = base_layer.out_features
+        
+        # Cap r to the layer's maximum possible rank
+        # For a matrix of shape (out_features, in_features), max rank is min(out, in)
+        max_rank = min(self.in_features, self.out_features)
+        self.r = min(pissa_config.r, max_rank)
         
         # Perform SVD decomposition on base weight
         self._initialize_svd_components()
@@ -1832,9 +1889,10 @@ def replace_linear_with_rotational_pissa(
                 if num_sub_batches > 1:
                     print(f"    Sub-batch {sub_batch_idx+1}/{num_sub_batches}: processing {sub_batch_size} layers...")
                 
-                # Stack weights for this sub-batch
+                # Stack weights for this sub-batch (supports ZeRO-3 sharded weights)
                 start_time = time.time()
-                weight_batch = torch.stack([m.weight.data.to(original_device) for _, m in sub_batch])
+                sub_batch_modules = [m for _, m in sub_batch]
+                weight_batch = gather_zero3_weights(sub_batch_modules, original_device)
                 stack_time = time.time() - start_time
                 
                 if sub_batch_idx == 0:  # Only print details for first sub-batch

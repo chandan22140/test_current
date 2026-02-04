@@ -1243,7 +1243,7 @@ class ViTRotationalTrainer:
             checkpoint_path = os.path.join(save_dir, f"{method}_best_model.pth")
             if os.path.exists(checkpoint_path):
                 print(f"\nLoading best model from {checkpoint_path} for test evaluation...")
-                checkpoint = torch.load(checkpoint_path)
+                checkpoint = torch.load(checkpoint_path, weights_only=False)
                 model.load_state_dict(checkpoint['model_state_dict'])
 
         # Evaluate on unseen test set and log

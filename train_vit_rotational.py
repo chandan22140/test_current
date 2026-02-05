@@ -462,22 +462,51 @@ class ViTDataset:
             )
 
         elif self.config.dataset == "resisc45":
-            # RESISC45: has train/val/test splits (parquet format)
-            train_parquet = os.path.join(self.config.data_path, 'resisc45', 'train-00000-of-00001.parquet')
-            val_parquet = os.path.join(self.config.data_path, 'resisc45', 'validation-00000-of-00001.parquet')
-            test_parquet = os.path.join(self.config.data_path, 'resisc45', 'test-00000-of-00001.parquet')
-
-            if not os.path.exists(train_parquet):
-                raise FileNotFoundError(f"RESISC45 train parquet not found: {train_parquet}")
-            if not os.path.exists(val_parquet):
-                raise FileNotFoundError(f"RESISC45 validation parquet not found: {val_parquet}")
-            if not os.path.exists(test_parquet):
-                print(f"Warning: Test parquet not found, using validation as test")
-                test_parquet = val_parquet
-
-            train_dataset = ParquetImageDataset(train_parquet, transform=temp_transform)
-            val_dataset = ParquetImageDataset(val_parquet, transform=temp_transform)
-            test_dataset = ParquetImageDataset(test_parquet, transform=temp_transform)
+            # RESISC45: Remote sensing image scene classification (45 classes)
+            # Use HuggingFace datasets for automatic download
+            try:
+                from datasets import load_dataset
+                
+                class HFImageDataset(Dataset):
+                    """Wrapper for HuggingFace image datasets."""
+                    def __init__(self, hf_dataset, transform=None, label_key='label'):
+                        self.dataset = hf_dataset
+                        self.transform = transform
+                        self.label_key = label_key
+                        # Extract labels for stratified splitting
+                        self._labels = [item[label_key] for item in hf_dataset]
+                    
+                    def __len__(self):
+                        return len(self.dataset)
+                    
+                    def __getitem__(self, idx):
+                        item = self.dataset[idx]
+                        image = item['image']
+                        if hasattr(image, 'convert'):
+                            image = image.convert('RGB')
+                        label = item[self.label_key]
+                        if self.transform:
+                            image = self.transform(image)
+                        return image, label
+                
+                print("Loading RESISC45 from HuggingFace...")
+                hf_resisc = load_dataset("timm/resisc45", cache_dir=self.config.data_path)
+                
+                # HF resisc45 has 'train', 'validation', and 'test' splits
+                if 'train' in hf_resisc and 'validation' in hf_resisc and 'test' in hf_resisc:
+                    train_dataset = HFImageDataset(hf_resisc['train'], transform=temp_transform)
+                    val_dataset = HFImageDataset(hf_resisc['validation'], transform=temp_transform)
+                    test_dataset = HFImageDataset(hf_resisc['test'], transform=temp_transform)
+                else:
+                    # Fallback: if splits are different, extract from train
+                    full_hf = HFImageDataset(hf_resisc['train'], transform=temp_transform)
+                    train_dataset, temp_dataset = self._extract_stratified_val_split(full_hf, val_fraction=0.2)
+                    val_dataset, test_dataset = self._extract_stratified_val_split(temp_dataset, val_fraction=0.5)
+                    
+            except ImportError:
+                raise ImportError("RESISC45 requires 'datasets' package. Install with: pip install datasets")
+            except Exception as e:
+                raise RuntimeError(f"Failed to load RESISC45 from HuggingFace: {e}")
 
         elif self.config.dataset == "sun397":
             # SUN397: Scene recognition dataset (397 classes)

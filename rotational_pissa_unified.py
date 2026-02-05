@@ -230,7 +230,7 @@ class RotationalPiSSAConfig:
     total_cycles: int = 3                        # Total cycles through all layers
     use_butterfly: bool = False                  # If True, use log(r) butterfly layers instead of (r-1) Givens
     butterfly_sequential: bool = False           # If True, train butterfly components one at a time (like Givens)
-    butterfly_block_size: int = 2                # Block size b for BOFT(m, b). b=2 gives O(r log r) params
+    butterfly_block_size: int = 1                # Block size b for BOFT(m, b). b=2 gives O(r log r) params
     
     # Way 2/3 specific parameters (Low-rank methods)
     low_rank_r: int = 4                          # Low rank for B,C matrices in ways 2&3
@@ -540,7 +540,7 @@ class ButterflyComponent(nn.Module):
         block_size: Size b of the base orthogonal blocks (default 2 for Givens rotations)
     """
     
-    def __init__(self, d: int, k: int, block_size: int = 2):
+    def __init__(self, d: int, k: int, block_size: int = 1):
         super().__init__()
         self.d = d
         self.k = k
@@ -717,7 +717,7 @@ class ButterflyRotationLayer(nn.Module):
         - Total params = d * log2(d) / 2 = 8 * 3 / 2 = 12 angles per R_U/R_V
     """
     
-    def __init__(self, d: int, block_size: int = 2):
+    def __init__(self, d: int, block_size: int = 1):
         super().__init__()
         self.d = d
         self.block_size = block_size

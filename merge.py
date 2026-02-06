@@ -6,6 +6,8 @@ from utils import initialize_text_to_text_model
 import os
 import torch
 import torch.nn as nn
+import concurrent.futures
+from functools import partial
 # CHANGED: No need for bnb LoRA layers since we use rotational PiSSA
 # from peft.tuners.lora.bnb import (
 #     Linear8bitLt as LoraLinear8bitLt,
@@ -63,7 +65,170 @@ def dequantize(model, dtype):
         print("Warning: bitsandbytes not available, skipping dequantization")
 
 
-def merge_rotational_pissa_weights(checkpoint_state_dict, base_model, pissa_config=None):
+def process_layer_merge_task(layer_prefix, checkpoint_state_dict, pissa_config, device="cpu", merged_layer_count=0):
+    """
+    Worker function to merge a single layer's weights.
+    Returns: (layer_prefix, merged_state_dict_subset, logs)
+    """
+    local_state = {}
+    logs = []
+    
+    # Get all components for this layer
+    S_key = f"{layer_prefix}.S"
+    R_U_key = f"{layer_prefix}.R_U"
+    R_V_key = f"{layer_prefix}.R_V"
+    U_key = f"{layer_prefix}.U"
+    V_key = f"{layer_prefix}.V"
+    base_weight_key = f"{layer_prefix}.base_layer.weight"
+    base_bias_key = f"{layer_prefix}.base_layer.bias"
+    
+    # Check if all required components exist
+    if not all(k in checkpoint_state_dict for k in [S_key, U_key, V_key, base_weight_key]):
+        logs.append(f"Warning: Missing components for {layer_prefix}, skipping")
+        return layer_prefix, local_state, logs
+    
+    # Load components
+    S = checkpoint_state_dict[S_key]  # [r]
+    U = checkpoint_state_dict[U_key]  # [r, out_features]
+    V = checkpoint_state_dict[V_key]  # [r, in_features]
+    W_residual = checkpoint_state_dict[base_weight_key]  # [out_features, in_features]
+    
+    # Get rotation matrices - handle all 4 rotation methods
+    r = S.shape[0]
+    
+    # Keys for way2/way3 parameters
+    B_U_key = f"{layer_prefix}.B_U"
+    C_U_key = f"{layer_prefix}.C_U"
+    B_V_key = f"{layer_prefix}.B_V"
+    C_V_key = f"{layer_prefix}.C_V"
+    
+    # Key for way1 Givens angles (after final step, these are merged into U/V)
+    givens_u_key = f"{layer_prefix}.current_givens_u.thetas"
+    givens_v_key = f"{layer_prefix}.current_givens_v.thetas"
+    
+    # Determine rotation method and compute R_U, R_V
+    # Way 0: R_U and R_V stored directly
+    if R_U_key in checkpoint_state_dict and R_V_key in checkpoint_state_dict:
+        R_U = checkpoint_state_dict[R_U_key]
+        R_V = checkpoint_state_dict[R_V_key]
+        if merged_layer_count == 0:
+            logs.append(f"  Using rotation method: way0 (direct R_U, R_V)")
+    
+    # Way 2/3: Compute R from B, C matrices
+    elif B_U_key in checkpoint_state_dict and C_U_key in checkpoint_state_dict:
+        B_U = checkpoint_state_dict[B_U_key].to(S.dtype)
+        C_U = checkpoint_state_dict[C_U_key].to(S.dtype)
+        B_V = checkpoint_state_dict[B_V_key].to(S.dtype)
+        C_V = checkpoint_state_dict[C_V_key].to(S.dtype)
+        
+        # Determine if way2 or way3 based on pissa_config if available
+        use_exp = False  # Default to way2
+        if pissa_config is not None:
+            method = getattr(pissa_config, 'method', 'way2')
+            use_exp = (method == 'way3')
+        
+        if use_exp:
+            # Way 3: R = exp(BC^T - CB^T)
+            skew_U = B_U @ C_U.T - C_U @ B_U.T
+            skew_V = B_V @ C_V.T - C_V @ B_V.T
+            R_U = torch.matrix_exp(skew_U.float()).to(S.dtype)
+            R_V = torch.matrix_exp(skew_V.float()).to(S.dtype)
+            if merged_layer_count == 0:
+                logs.append(f"  Using rotation method: way3 (exp of skew-symmetric)")
+        else:
+            # Way 2: R = I + BC^T - CB^T
+            I = torch.eye(r, dtype=S.dtype, device=S.device)
+            R_U = I + B_U @ C_U.T - C_U @ B_U.T
+            R_V = I + B_V @ C_V.T - C_V @ B_V.T
+            if merged_layer_count == 0:
+                logs.append(f"  Using rotation method: way2 (I + BC^T - CB^T)")
+    
+    # Way 1: Givens rotations - after training, rotations are merged into U/V
+    # So we use identity here (the rotations are already in U/V)
+    elif givens_u_key in checkpoint_state_dict:
+        # Givens angles present - need to compute rotation matrix from angles
+        # This is rare since step_phase() merges rotations into U/V
+        # But we support it for completeness
+        from rotational_pissa_unified import GivensRotationLayer, generate_givens_pairings
+        
+        thetas_u = checkpoint_state_dict[givens_u_key]
+        thetas_v = checkpoint_state_dict[givens_v_key]
+        
+        # Get the pairings (same as what was used in training)
+        n_layers = pissa_config.n_givens_layers if pissa_config else (r - 1)
+        pairings = generate_givens_pairings(r, n_layers)[0]  # Use first layer pairings
+        
+        # Compute rotation matrices from Givens angles
+        R_U = torch.eye(r, device=thetas_u.device, dtype=S.dtype)
+        R_V = torch.eye(r, device=thetas_v.device, dtype=S.dtype)
+        
+        cos_u, sin_u = torch.cos(thetas_u), torch.sin(thetas_u)
+        cos_v, sin_v = torch.cos(thetas_v), torch.sin(thetas_v)
+        
+        for i, (p, q) in enumerate(pairings):
+            if p < r and q < r:
+                R_U[p, p], R_U[q, q] = cos_u[i], cos_u[i]
+                R_U[p, q], R_U[q, p] = -sin_u[i], sin_u[i]
+                R_V[p, p], R_V[q, q] = cos_v[i], cos_v[i]
+                R_V[p, q], R_V[q, p] = -sin_v[i], sin_v[i]
+            
+            if merged_layer_count == 0:
+                logs.append(f"  Using rotation method: way1 (Givens angles)")
+    
+    else:
+        # Default: identity (way1 after all rotations merged into U/V)
+        R_U = torch.eye(r, dtype=S.dtype, device=S.device)
+        R_V = torch.eye(r, dtype=S.dtype, device=S.device)
+        if merged_layer_count == 0:
+            logs.append(f"  Using rotation method: identity (way1 with rotations merged into U/V)")
+    
+    # Compute scaling
+    # NOTE: In rotational_pissa_unified.py line 497, scaling = 1 (lora_alpha/r is commented out)
+    # So we use 1.0 here, not lora_alpha / r
+    scaling = 1.0
+    
+    with torch.no_grad():
+        # Ensure everything is in the same dtype
+        dtype = W_residual.dtype
+        
+        # Move to target device for computation
+        S_dev = S.to(device).to(dtype)
+        U_dev = U.to(device).to(dtype)  # [out_features, r]
+        V_dev = V.to(device).to(dtype)  # [r, in_features]
+        R_U_dev = R_U.to(device).to(dtype)  # [r, r]
+        R_V_dev = R_V.to(device).to(dtype)  # [r, r]
+        
+        # Step 1: R_U @ diag(S) @ R_V = [r, r]
+        middle = R_U_dev @ torch.diag(S_dev) @ R_V_dev  # [r, r] @ [r, r] @ [r, r] = [r, r]
+        
+        # Step 2: U @ middle @ V = [out_features, r] @ [r, r] @ [r, in_features] = [out_features, in_features]
+        W_principal = U_dev @ middle @ V_dev  # [out_features, in_features]
+        
+        # Merge: W_merged = W_residual + scaling * W_principal
+        # Note: In the training code, scaling = 1 (see line 497 in rotational_pissa_unified.py)
+        # The lora_alpha/r scaling is commented out
+        # Move result back to CPU (or same device as residual) for addition to avoid OOM on GPU if holding full model
+        
+        # VERY IMPORTANT: If we are multithreading on CPU, W_principal needs to be on CPU.
+        # If device is cuda, we move it back.
+        if device != "cpu":
+             W_principal = W_principal.to("cpu")
+             
+        W_merged = W_residual + scaling * W_principal.to(W_residual.dtype)
+    
+    # Store merged weight with standard key (remove .base_layer)
+    merged_weight_key = f"{layer_prefix}.weight"
+    local_state[merged_weight_key] = W_merged
+    
+    # Handle bias if present
+    if base_bias_key in checkpoint_state_dict:
+        merged_bias_key = f"{layer_prefix}.bias"
+        local_state[merged_bias_key] = checkpoint_state_dict[base_bias_key]
+        
+    return layer_prefix, local_state, logs
+
+
+def merge_rotational_pissa_weights(checkpoint_state_dict, base_model, pissa_config=None, device="cpu", num_threads=1):
     """
     Merge Rotational PiSSA adapter weights back into standard linear layer weights.
     
@@ -103,198 +268,45 @@ def merge_rotational_pissa_weights(checkpoint_state_dict, base_model, pissa_conf
     
     # Process each layer
     merged_layer_count = 0
-    for layer_prefix in pissa_layers:
-        # Get all components for this layer
-        S_key = f"{layer_prefix}.S"
-        R_U_key = f"{layer_prefix}.R_U"
-        R_V_key = f"{layer_prefix}.R_V"
-        U_key = f"{layer_prefix}.U"
-        V_key = f"{layer_prefix}.V"
-        base_weight_key = f"{layer_prefix}.base_layer.weight"
-        base_bias_key = f"{layer_prefix}.base_layer.bias"
+    
+    # Prepare tasks
+    print(f"Merging {len(pissa_layers)} layers with {num_threads} threads...")
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+        futures = []
+        for i, layer_prefix in enumerate(pissa_layers):
+            # Pass i as merged_layer_count to allow logging only on first layer (approximately)
+            futures.append(
+                executor.submit(
+                    process_layer_merge_task, 
+                    layer_prefix, 
+                    checkpoint_state_dict, 
+                    pissa_config, 
+                    device, 
+                    i
+                )
+            )
         
-        # Check if all required components exist
-        if not all(k in checkpoint_state_dict for k in [S_key, U_key, V_key, base_weight_key]):
-            print(f"Warning: Missing components for {layer_prefix}, skipping")
-            continue
-        
-        # Load components
-        S = checkpoint_state_dict[S_key]  # [r]
-        U = checkpoint_state_dict[U_key]  # [r, out_features]
-        V = checkpoint_state_dict[V_key]  # [r, in_features]
-        W_residual = checkpoint_state_dict[base_weight_key]  # [out_features, in_features]
-        
-        # Get rotation matrices - handle all 4 rotation methods
-        r = S.shape[0]
-        
-        # Keys for way2/way3 parameters
-        B_U_key = f"{layer_prefix}.B_U"
-        C_U_key = f"{layer_prefix}.C_U"
-        B_V_key = f"{layer_prefix}.B_V"
-        C_V_key = f"{layer_prefix}.C_V"
-        
-        # Key for way1 Givens angles (after final step, these are merged into U/V)
-        givens_u_key = f"{layer_prefix}.current_givens_u.thetas"
-        givens_v_key = f"{layer_prefix}.current_givens_v.thetas"
-        
-        # Determine rotation method and compute R_U, R_V
-        # Way 0: R_U and R_V stored directly
-        if R_U_key in checkpoint_state_dict and R_V_key in checkpoint_state_dict:
-            R_U = checkpoint_state_dict[R_U_key]
-            R_V = checkpoint_state_dict[R_V_key]
-            if merged_layer_count == 0:
-                print(f"  Using rotation method: way0 (direct R_U, R_V)")
-        
-        # Way 2/3: Compute R from B, C matrices
-        elif B_U_key in checkpoint_state_dict and C_U_key in checkpoint_state_dict:
-            B_U = checkpoint_state_dict[B_U_key].to(S.dtype)
-            C_U = checkpoint_state_dict[C_U_key].to(S.dtype)
-            B_V = checkpoint_state_dict[B_V_key].to(S.dtype)
-            C_V = checkpoint_state_dict[C_V_key].to(S.dtype)
-            
-            # Determine if way2 or way3 based on pissa_config if available
-            use_exp = False  # Default to way2
-            if pissa_config is not None:
-                method = getattr(pissa_config, 'method', 'way2')
-                use_exp = (method == 'way3')
-            
-            if use_exp:
-                # Way 3: R = exp(BC^T - CB^T)
-                skew_U = B_U @ C_U.T - C_U @ B_U.T
-                skew_V = B_V @ C_V.T - C_V @ B_V.T
-                R_U = torch.matrix_exp(skew_U.float()).to(S.dtype)
-                R_V = torch.matrix_exp(skew_V.float()).to(S.dtype)
-                if merged_layer_count == 0:
-                    print(f"  Using rotation method: way3 (exp of skew-symmetric)")
-            else:
-                # Way 2: R = I + BC^T - CB^T
-                I = torch.eye(r, dtype=S.dtype, device=S.device)
-                R_U = I + B_U @ C_U.T - C_U @ B_U.T
-                R_V = I + B_V @ C_V.T - C_V @ B_V.T
-                if merged_layer_count == 0:
-                    print(f"  Using rotation method: way2 (I + BC^T - CB^T)")
-        
-        # Way 1: Givens rotations - after training, rotations are merged into U/V
-        # So we use identity here (the rotations are already in U/V)
-        elif givens_u_key in checkpoint_state_dict:
-            # Givens angles present - need to compute rotation matrix from angles
-            # This is rare since step_phase() merges rotations into U/V
-            # But we support it for completeness
-            from rotational_pissa_unified import GivensRotationLayer, generate_givens_pairings
-            
-            thetas_u = checkpoint_state_dict[givens_u_key]
-            thetas_v = checkpoint_state_dict[givens_v_key]
-            
-            # Get the pairings (same as what was used in training)
-            n_layers = pissa_config.n_givens_layers if pissa_config else (r - 1)
-            pairings = generate_givens_pairings(r, n_layers)[0]  # Use first layer pairings
-            
-            # Compute rotation matrices from Givens angles
-            R_U = torch.eye(r, device=thetas_u.device, dtype=S.dtype)
-            R_V = torch.eye(r, device=thetas_v.device, dtype=S.dtype)
-            
-            cos_u, sin_u = torch.cos(thetas_u), torch.sin(thetas_u)
-            cos_v, sin_v = torch.cos(thetas_v), torch.sin(thetas_v)
-            
-            for i, (p, q) in enumerate(pairings):
-                if p < r and q < r:
-                    R_U[p, p], R_U[q, q] = cos_u[i], cos_u[i]
-                    R_U[p, q], R_U[q, p] = -sin_u[i], sin_u[i]
-                    R_V[p, p], R_V[q, q] = cos_v[i], cos_v[i]
-                    R_V[p, q], R_V[q, p] = -sin_v[i], sin_v[i]
-            
-            if merged_layer_count == 0:
-                print(f"  Using rotation method: way1 (Givens angles)")
-        
-        else:
-            # Default: identity (way1 after all rotations merged into U/V)
-            R_U = torch.eye(r, dtype=S.dtype, device=S.device)
-            R_V = torch.eye(r, dtype=S.dtype, device=S.device)
-            if merged_layer_count == 0:
-                print(f"  Using rotation method: identity (way1 with rotations merged into U/V)")
-        
-        # Compute scaling
-        # NOTE: In rotational_pissa_unified.py line 497, scaling = 1 (lora_alpha/r is commented out)
-        # So we use 1.0 here, not lora_alpha / r
-        scaling = 1.0
-        
-        # Compute W_principal = U @ R_U @ diag(S) @ R_V^T @ V^T
-        # Step by step for clarity:
-        # Note: U is [r, out_features], V is [r, in_features]
-        # W_principal should be [out_features, in_features]
-        
-        # U^T is [out_features, r]
-        # R_U^T is [r, r]
-        # diag(S) is [r, r] or just element-wise multiply
-        # R_V is [r, r]
-        # V is [r, in_features]
-        
-        # Method: U^T @ R_U^T = [out_features, r]
-        #         then multiply by S element-wise in the middle
-        #         then @ R_V @ V^T would give [out_features, in_features]
-        # Wait, forward is: x @ V^T @ R_V^T @ S @ R_U^T @ U^T
-        # So W_principal^T = V^T @ R_V^T @ S @ R_U^T @ U^T
-        # W_principal = (V^T @ R_V^T @ S @ R_U^T @ U^T)^T = U @ R_U @ S @ R_V @ V
-        # Actually, let's trace forward more carefully:
-        # Forward computes: x @ V^T @ R_V^T  (we have R_V.T in code, which is R_V transposed)
-        # Wait, the code does:
-        #   x_adapted = x_adapted @ R_V.T   which is x @ R_V^T
-        #   x_adapted = x_adapted @ R_U.T   which is x @ R_U^T
-        # So the chain is: x @ V^T @ R_V^T @ diag(S) @ R_U^T @ U^T
-        # This means W = (V^T @ R_V^T @ diag(S) @ R_U^T @ U^T)^T = U @ R_U @ diag(S) @ R_V @ V
-        
-        with torch.no_grad():
-            # Ensure everything is in the same dtype
-            dtype = W_residual.dtype
-            S = S.to(dtype)
-            U = U.to(dtype)  # [out_features, r]
-            V = V.to(dtype)  # [r, in_features]
-            R_U = R_U.to(dtype)  # [r, r]
-            R_V = R_V.to(dtype)  # [r, r]
-            
-            # The forward pass computes (see rotational_pissa_unified.py lines 824-833):
-            # x @ V^T @ R_V^T @ diag(S) @ R_U^T @ U^T
-            # 
-            # This is equivalent to: Y = X @ W_principal^T
-            # where W_principal^T = V^T @ R_V^T @ diag(S) @ R_U^T @ U^T
-            # 
-            # Taking transpose of both sides:
-            # W_principal = (V^T @ R_V^T @ diag(S) @ R_U^T @ U^T)^T
-            #             = U @ R_U @ diag(S) @ R_V @ V   (using (ABC)^T = C^T B^T A^T)
-            # 
-            # Note: diag(S)^T = diag(S) since it's diagonal
-            
-            # Shapes:
-            # U: [out_features, r]
-            # R_U: [r, r]
-            # diag(S): [r, r]
-            # R_V: [r, r]  <-- NOT R_V.T!
-            # V: [r, in_features]
-            # Result: [out_features, in_features]
-            
-            # Compute step by step:
-            # Step 1: R_U @ diag(S) @ R_V = [r, r]
-            middle = R_U @ torch.diag(S) @ R_V  # [r, r] @ [r, r] @ [r, r] = [r, r]
-            
-            # Step 2: U @ middle @ V = [out_features, r] @ [r, r] @ [r, in_features] = [out_features, in_features]
-            W_principal = U @ middle @ V  # [out_features, in_features]
-            
-            # Merge: W_merged = W_residual + scaling * W_principal
-            # Note: In the training code, scaling = 1 (see line 497 in rotational_pissa_unified.py)
-            # The lora_alpha/r scaling is commented out
-            W_merged = W_residual + scaling * W_principal
-        
-        # Store merged weight with standard key (remove .base_layer)
-        merged_weight_key = f"{layer_prefix}.weight"
-        merged_state_dict[merged_weight_key] = W_merged
-        
-        # Handle bias if present
-        if base_bias_key in checkpoint_state_dict:
-            merged_bias_key = f"{layer_prefix}.bias"
-            merged_state_dict[merged_bias_key] = checkpoint_state_dict[base_bias_key]
-        
-        merged_layer_count += 1
-        
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                layer_prefix, local_state, logs = future.result()
+                # Print any logs from the worker
+                for log_msg in logs:
+                    print(log_msg)
+                
+                # Update main dict
+                merged_state_dict.update(local_state)
+                merged_layer_count += 1
+                
+                if merged_layer_count % 10 == 0:
+                    print(f"Merged {merged_layer_count}/{len(pissa_layers)} layers", end="\r")
+                    
+            except Exception as e:
+                print(f"Error merging layer: {e}")
+                raise e
+                
+    print(f"\nMerged {merged_layer_count}/{len(pissa_layers)} layers")
+    
     # Copy over non-PiSSA layers as-is
     for key, value in checkpoint_state_dict.items():
         # Skip PiSSA-specific keys
@@ -319,6 +331,8 @@ def merge(
     merge_suffix="merged_checkpoint",
     lora_alpha: float = 8.0,
     snapshot_path: str = None,
+    device: str = "cpu",
+    num_threads: int = 16, # Default to 16 threads for high CPU usage
 ):
     """
     Merge Rotational PiSSA adapters back into base model weights.
@@ -335,6 +349,7 @@ def merge(
     print(f"Loading checkpoint from: {checkpoint}")
     
     # Find the checkpoint file
+    index_file = os.path.join(checkpoint, "pytorch_model.bin.index.json")
     pytorch_model_path = os.path.join(checkpoint, "pytorch_model.bin")
     
     # final_checkpoint.pt may be in a different folder (snapshot_path)
@@ -346,11 +361,47 @@ def merge(
         final_checkpoint_path = os.path.join(checkpoint, "final_checkpoint.pt")
         init_checkpoint_path = os.path.join(checkpoint, "init_checkpoint.pt")
     
-    checkpoint_data = None
+    checkpoint_data = {}
     pissa_config = None
     
-    # Prefer final_checkpoint.pt from snapshot (has pissa_config metadata)
-    if os.path.exists(final_checkpoint_path):
+    # Priority 1: Sharded Checkpoint
+    if os.path.exists(index_file):
+        print(f"Found sharded checkpoint index: {index_file}")
+        import json
+        with open(index_file, "r") as f:
+            index = json.load(f)
+        
+        weight_map = index.get("weight_map", {})
+        shard_files = sorted(set(weight_map.values()))
+        
+        print(f"Loading {len(shard_files)} shards with {num_threads} threads...")
+        
+        def load_shard(shard_file):
+            shard_path = os.path.join(checkpoint, shard_file)
+            print(f"Loading shard: {shard_path}")
+            try:
+                # Load to CPU to avoid OOM
+                return torch.load(shard_path, map_location="cpu")
+            except Exception as e:
+                print(f"Error loading shard {shard_path}: {e}")
+                raise e
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+            # Submit all load tasks
+            future_to_shard = {
+                executor.submit(load_shard, sf): sf for sf in shard_files
+            }
+            
+            for future in concurrent.futures.as_completed(future_to_shard):
+                shard_data = future.result()
+                checkpoint_data.update(shard_data)
+                del shard_data
+                
+        # Check if pissa_config is in the directory (unlikely for standard sharded saves but check anyway)
+        # Note: We rely on passed lora_alpha argument if config is missing
+        
+    # Priority 2: Custom final_checkpoint.pt (has pissa_config metadata)
+    elif os.path.exists(final_checkpoint_path):
         print(f"Loading from final_checkpoint.pt: {final_checkpoint_path}")
         loaded = torch.load(final_checkpoint_path, map_location='cpu', weights_only=False)
         if isinstance(loaded, dict) and 'model_state_dict' in loaded:
@@ -359,9 +410,13 @@ def merge(
             pissa_config = loaded.get('pissa_config')
         else:
             checkpoint_data = loaded
+
+    # Priority 3: Monolithic pytorch_model.bin
     elif os.path.exists(pytorch_model_path):
         print(f"Loading from pytorch_model.bin")
         checkpoint_data = torch.load(pytorch_model_path, map_location='cpu')
+
+    # Priority 4: Custom init_checkpoint.pt
     elif os.path.exists(init_checkpoint_path):
         print(f"Loading from init_checkpoint.pt: {init_checkpoint_path}")
         loaded = torch.load(init_checkpoint_path, map_location='cpu', weights_only=False)
@@ -394,7 +449,9 @@ def merge(
         merged_state_dict = merge_rotational_pissa_weights(
             checkpoint_data, 
             base_model=None,  # Not needed for pure merge
-            pissa_config=pissa_config
+            pissa_config=pissa_config,
+            device=device,
+            num_threads=num_threads
         )
     else:
         print("No Rotational PiSSA layers detected. Using checkpoint as-is.")

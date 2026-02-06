@@ -123,34 +123,49 @@ def calculate_pissa_params(num_layers, way, r, low_rank_r=None, use_butterfly=Fa
         params_per_layer = params_s + 2 * (r * r)
         desc = f"Way 0 (Full R): S({r}) + R_U({r}x{r}) + R_V({r}x{r})"
         
+    if way == "0":
+        # Way 0: Two full rotation matrices R_U and R_V (r x r)
+        # R_U: r*r, R_V: r*r
+        params_per_layer = params_s + 2 * (r * r)
+        desc = f"Way 0 (Full R): S({r}) + R_U({r}x{r}) + R_V({r}x{r})"
+        
     elif way == "1":
+        # Way 1 (SOARA-V2b / Sequential):
+        # Formula: L * ceil(log2(r)) * (d + r)
+        # where L = num_layers (total linear modules)
+        #       m = ceil(log2(r))
+        #       d = r (or r_padded) -> rotation params per phase
+        #       r = singular values
+        
+        # Determine effective r (padded for butterfly)
         if use_butterfly:
-            # Way 1 with Butterfly: Uses log2(r) butterfly components
-            # Each component has r/2 params, total per R: r*log2(r)/2
-            r_padded = 2 ** math.ceil(math.log2(r))
-            m = int(math.log2(r_padded))
-            params_per_rotation = r_padded * m // 2
-            
-            if butterfly_sequential:
-                # Sequential: only one butterfly component active at a time
-                # A single component B(d, k) has d/2 params (for b=2)
-                params_active = r_padded // 2
-                params_per_layer = params_s + 2 * params_active
-                desc = (f"Way 1 (Butterfly Sequential): S({r}) + "
-                       f"Active_Butterfly_U({params_active}) + Active_Butterfly_V({params_active})")
-            else:
-                # All butterfly components active simultaneously
-                params_per_layer = params_s + 2 * params_per_rotation
-                desc = (f"Way 1 (Butterfly Full): S({r}) + "
-                       f"R_U_butterfly({params_per_rotation}) + R_V_butterfly({params_per_rotation})")
+             r_padded = 2 ** math.ceil(math.log2(r))
         else:
-            # Way 1: Sequential Givens Rotations (Batched SVD strategy)
-            # Only ONE layer of disjoint pairs active at a time for U and V.
-            # Max disjoint pairs in r dimensions = floor(r/2)
-            # Active params = S + thetas_U + thetas_V
-            n_pairs = r // 2
-            params_per_layer = params_s + 2 * n_pairs
-            desc = f"Way 1 (Sequential Givens): S({r}) + Active_Givens_U({n_pairs}) + Active_Givens_V({n_pairs})"
+             r_padded = r 
+             
+        # Number of phases m
+        if use_butterfly:
+            m = math.ceil(math.log2(r_padded))
+        else:
+            m = r - 1
+        
+        # d in formula corresponds to rotation parameters per phase
+        # (U and V each have d/2 angles -> total d)
+        d_param = r_padded
+        
+        # params per phase = (d + r)
+        params_per_phase = d_param + r
+        
+        if butterfly_sequential:
+            # Sequential: only one phase active at a time
+            # Formula: L * (d + r)
+            params_per_layer = params_per_phase
+            desc = f"Way 1 seq (formula): d({d_param}) + r({r})"
+        else:
+            # Full: all phases active
+            # Formula: L * m * (d + r)
+            params_per_layer = m * params_per_phase
+            desc = f"Way 1 full (formula): m({m}) * (d({d_param}) + r({r}))"
         
     elif way == "2" or way == "3":
         # Way 2/3: Low-rank parameterization I + BC^T - CB^T

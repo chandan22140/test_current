@@ -167,6 +167,10 @@ class TrainingConfig:
     # Reproducibility
     seed: int = 42  # Random seed for reproducibility
     
+    # W&B Resume Support
+    wandb_id: Optional[str] = None
+    wandb_resume: Optional[str] = None
+    
     # Freezing strategy to control trainable parameter count
     freeze_backbone: bool = True            # Freeze all non-adapter params by default
     train_head: bool = True                 # Keep classifier head trainable
@@ -1178,10 +1182,16 @@ class ViTRotationalTrainer:
             # Check if this is a sweep run
             if wandb.run is None:
                 run_name = f"{method}_{self.config.experiment_name or 'vit_rotational'}"
-                wandb.init(
-                    project=str(self.config.project_name)+str(self.config.dataset),
-                    name=run_name,
-                    config={
+                
+                # Use provided project name if available, else construct it
+                project = self.config.project_name
+                if project == "rotational-pissa-vit": # default value
+                     project = str(self.config.project_name)+str(self.config.dataset)
+                
+                init_kwargs = {
+                    "project": project,
+                    "name": run_name,
+                    "config": {
                         "method": method,
                         "rank": self.config.pissa_rank,
                         "alpha": self.config.pissa_alpha,
@@ -1194,7 +1204,15 @@ class ViTRotationalTrainer:
                         "steps_per_phase": self.config.steps_per_phase,
                         "total_cycles": self.config.total_cycles
                     }
-                )
+                }
+                
+                # Add resume support
+                if self.config.wandb_id:
+                    init_kwargs["id"] = self.config.wandb_id
+                if self.config.wandb_resume:
+                    init_kwargs["resume"] = self.config.wandb_resume
+                    
+                wandb.init(**init_kwargs)
             else:
                 # This is a sweep run, config already updated before trainer creation
                 print(f"Running sweep with config: alpha={self.config.pissa_alpha}, "
@@ -1515,7 +1533,9 @@ class ViTRotationalTrainer:
         """Get the directory for saving/loading results for a specific method."""
         # Determine subfolder name
         subfolder_name = "default_run"
-        if wandb.run and wandb.run.name:
+        if wandb.run and getattr(wandb.run, "project", None):
+            subfolder_name = wandb.run.project
+        elif wandb.run and wandb.run.name:
             subfolder_name = wandb.run.name
         elif self.config.experiment_name:
             subfolder_name = self.config.experiment_name
@@ -1776,6 +1796,13 @@ def main():
     # Other options
     parser.add_argument("--output-dir", type=str, default="./outputs",
                        help="Output directory")
+    parser.add_argument("--project-name", type=str, default="rotational-pissa-vit",
+                       help="W&B project name")
+    parser.add_argument("--wandb-id", type=str, default=None,
+                       help="W&B Run ID to resume")
+    parser.add_argument("--wandb-resume", type=str, default=None,
+                       choices=["allow", "must", "never", "auto"],
+                       help="W&B resume mode")
     parser.add_argument("--no-wandb", action="store_true",
                        help="Disable wandb logging")
     parser.add_argument("--sweep", action="store_true",
@@ -1830,7 +1857,10 @@ def main():
         
         # Other
         output_dir=args.output_dir,
+        project_name=args.project_name,
         use_wandb=(not args.no_wandb) or args.sweep,  # Enable wandb unless explicitly disabled, OR if running sweep
+        wandb_id=args.wandb_id,
+        wandb_resume=args.wandb_resume,
         experiment_name=args.experiment_name,
         device=args.device,
         k_shot=args.k_shot,

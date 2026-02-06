@@ -12,7 +12,7 @@ from pathlib import Path
 # Settings
 LOG_DIR = "/home/chandan/test_current/outputs/rank_ablation"
 OUTPUT_DIR = "/home/chandan/test_current/outputs/rank_ablation/plots"
-DATASETS = ["cifar100", "dtd", "sun397", "fer2013", "fgvc_aircraft"]
+DATASETS = ["cifar100", "dtd", "sun397"]
 RANKS = [2, 4, 8, 16]
 COLORS = {2: '#e74c3c', 4: '#f39c12', 8: '#27ae60', 16: '#3498db'}
 LABELS = {2: 'Rank 2', 4: 'Rank 4', 8: 'Rank 8', 16: 'Rank 16'}
@@ -28,7 +28,7 @@ def parse_log_file(log_path):
             for line in f:
                 match = re.search(pattern, line)
                 if match:
-                    val_accs.append(float(match.group(1)))
+                    val_accs.append(float(match.group(1)) * 100)
     except FileNotFoundError:
         print(f"  Warning: Log not found: {log_path}")
         return None
@@ -41,6 +41,7 @@ def plot_dataset_convergence(dataset, log_dir, output_dir):
     
     plt.figure(figsize=(8, 6))
     
+    all_vals = []
     found_data = False
     for rank in RANKS:
         log_path = os.path.join(log_dir, f"train_{dataset}_r{rank}.log")
@@ -55,7 +56,8 @@ def plot_dataset_convergence(dataset, log_dir, output_dir):
                     marker='o',
                     markersize=4)
             found_data = True
-            print(f"  {LABELS[rank]}: {len(val_accs)} epochs, final acc = {val_accs[-1]:.4f}")
+            all_vals.extend(val_accs)
+            print(f"  {LABELS[rank]}: {len(val_accs)} epochs, final acc = {val_accs[-1]:.2f}%")
     
     if not found_data:
         print(f"  No data found for {dataset}")
@@ -66,11 +68,17 @@ def plot_dataset_convergence(dataset, log_dir, output_dir):
     dataset_display = dataset.upper().replace('_', ' ')
     plt.title(f'{dataset_display} - Validation Accuracy Convergence', fontsize=14, fontweight='bold')
     plt.xlabel('Epoch', fontsize=12)
-    plt.ylabel('Validation Accuracy', fontsize=12)
+    plt.ylabel('Validation Accuracy (%)', fontsize=12)
     plt.legend(loc='lower right', fontsize=10)
     plt.grid(True, alpha=0.3)
     plt.xlim(0.5, None)
-    plt.ylim(0, 1)
+    # Dynamic limits
+    if all_vals:
+        y_min = max(0, min(all_vals)) * 0.995
+        y_max = min(100, max(all_vals)) * 1.005
+        plt.ylim(y_min, y_max)
+    else:
+        plt.ylim(0, 100)
     
     # Save plot
     os.makedirs(output_dir, exist_ok=True)
@@ -90,6 +98,7 @@ def create_combined_plot(log_dir, output_dir):
     
     for idx, dataset in enumerate(DATASETS):
         ax = axes[idx]
+        dataset_vals = []
         
         for rank in RANKS:
             log_path = os.path.join(log_dir, f"train_{dataset}_r{rank}.log")
@@ -103,14 +112,21 @@ def create_combined_plot(log_dir, output_dir):
                        linewidth=1.5,
                        marker='o',
                        markersize=3)
+                dataset_vals.extend(val_accs)
         
         dataset_display = dataset.upper().replace('_', ' ')
         ax.set_title(dataset_display, fontsize=12, fontweight='bold')
         ax.set_xlabel('Epoch', fontsize=10)
-        ax.set_ylabel('Val Accuracy', fontsize=10)
+        ax.set_ylabel('Val Accuracy (%)', fontsize=10)
         ax.legend(loc='lower right', fontsize=8)
         ax.grid(True, alpha=0.3)
-        ax.set_ylim(0, 1)
+        # Dynamic limits
+        if dataset_vals:
+            y_min = max(0, min(dataset_vals)) * 0.995
+            y_max = min(100, max(dataset_vals)) * 1.005
+            ax.set_ylim(y_min, y_max)
+        else:
+            ax.set_ylim(0, 100)
     
     # Hide unused subplot
     axes[5].axis('off')

@@ -187,7 +187,7 @@ def setup_model_and_tokenizer(model_name, lora_rank, lora_alpha, lora_dropout):
     
     # Print model info
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"  ✓ Loaded model: {total_params/1e9:.2f}B parameters")
+    print(f"  ✓ Loaded model: {total_params} parameters")
     
     # Configure LoRA
     print(f"\n🔗 Applying LoRA (rank={lora_rank}, alpha={lora_alpha})")

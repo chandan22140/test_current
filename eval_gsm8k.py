@@ -225,7 +225,7 @@ def extract_answer(text: str) -> tuple:
     return 0, "none"
 
 
-def main(model_name, eval_seed=0, temperature=0.8, bsz=4, tokenizer_name=None, 
+def main(model_name, eval_seed=0, temperature=0.0, bsz=4, tokenizer_name=None, 
          gpu_memory_utilization=0.8, max_num_seqs=64, log_file=None, verbose=True):
     """
     Evaluate model on GSM8K test set.

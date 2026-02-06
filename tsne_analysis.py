@@ -232,7 +232,7 @@ def get_fgvc_test_loader(
 
 
 def get_best_ratio_classes(data_path: str = "./data") -> Tuple[List[int], List[str]]:
-    selected_classes = [71, 92, 82, 62, 72]
+    selected_classes = [57, 71, 92, 90, 83]
     
     # Load dataset to get class names
     temp_dataset = torchvision.datasets.FGVCAircraft(
@@ -240,7 +240,6 @@ def get_best_ratio_classes(data_path: str = "./data") -> Tuple[List[int], List[s
     )
     class_names = [temp_dataset.classes[c] for c in selected_classes]
     
-    print(f"\nUsing top 5 classes by inter/intra cluster ratio:")
     for idx, name in zip(selected_classes, class_names):
         print(f"  Class {idx}: {name}")
     

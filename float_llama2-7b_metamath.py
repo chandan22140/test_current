@@ -147,7 +147,7 @@ def main(lora_alpha=128, lora_rank=None, sample_size=128, seed=42, resume_from_c
         per_device_batch_size=1,
         real_batch_size=128,
         bf16=(model_dtype == "bf16"),
-        eval_epochs=0.25,
+        eval_epochs=0.1,
         early_stopping_patience=3,
         max_length=1024,
         logging_steps=1,
@@ -163,6 +163,7 @@ def main(lora_alpha=128, lora_rank=None, sample_size=128, seed=42, resume_from_c
         resume_from_checkpoint=resume_from_checkpoint,
         training_args=dict(
             lr_scheduler_type="cosine",
+            adam_epsilon=1e-10,
             # If track_grad_norm is False, we disable max_grad_norm (set to 0) to skip clipping and sync overhead
             max_grad_norm=1.0 if track_grad_norm else 0.0,
             warmup_ratio=0.03,

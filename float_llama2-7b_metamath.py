@@ -161,6 +161,7 @@ def main(lora_alpha=128, lora_rank=None, sample_size=128, seed=42, resume_from_c
         pissa_config=pissa_config,
         # CHANGED: Pass resume_from_checkpoint for resuming training
         resume_from_checkpoint=resume_from_checkpoint,
+        save_total_limit=2, # Retain last 2 checkpoints
         training_args=dict(
             lr_scheduler_type="cosine",
             adam_epsilon=1e-10,

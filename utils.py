@@ -255,7 +255,7 @@ def train_text_to_text_model(
         eval_steps=eval_steps,
         save_steps=eval_steps,
         save_strategy="steps",
-        save_total_limit=1,
+        save_total_limit=kwargs.get("save_total_limit", 1),
         load_best_model_at_end=kwargs.get("load_best_model_at_end", True),
         metric_for_best_model=kwargs.get("metric_for_best_model", "eval_loss"),
         greater_is_better=kwargs.get("greater_is_better", False),
@@ -266,8 +266,10 @@ def train_text_to_text_model(
         seed=kwargs.get("seed", 42),
         ddp_find_unused_parameters=False,
         save_safetensors=False,
-        dataloader_num_workers=12,
+        dataloader_num_workers=12,  # Increased from 12 to maximize CPU utilization
+        # dataloader_prefetch_factor=4,  # Prefetch 4 batches per worker (96 batches total)
         dataloader_pin_memory=True,
+        # dataloader_persistent_workers=True,  # Keep workers alive between epochs
         **kwargs.get("training_args", {}),
     )
 

@@ -11,7 +11,7 @@ BATCH_SIZE=32
 METHOD="way0"
 
 # Datasets and ranks
-DATASETS=("fer2013" "fgvc_aircraft")
+DATASETS=("cifar100", "dtd", "sun397", "fer2013", "fgvc_aircraft")
 RANKS=(2 4 8 16)
 
 OUTPUT_BASE="/home/chandan/test_current/outputs/rank_ablation"

@@ -11,6 +11,7 @@ sweeps = [
     {"name": "Way 0 (Rank 16) - Resisc45", "path": "chandan22140-indraprastha-institute-of-information-techn/rotational-pissa-resisc45/sweeps/sxvy6m9p"},
 ]
 
+wandb.login(key="5b72e552516fbddcc3131462654d458952315d26")
 api = wandb.Api()
 
 print("Fetching sweep results...\n")

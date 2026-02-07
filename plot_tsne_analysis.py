@@ -232,7 +232,7 @@ def get_fgvc_test_loader(
 
 
 def get_best_ratio_classes(data_path: str = "./data") -> Tuple[List[int], List[str]]:
-    selected_classes = [57, 71, 92, 90, 83]
+    selected_classes = [71, 92, 82, 62, 72]
     
     # Load dataset to get class names
     temp_dataset = torchvision.datasets.FGVCAircraft(
@@ -592,9 +592,13 @@ def plot_comparison(
     n_configs = len(all_tsne_data)
     n_classes = len(class_names)
     
-    # Calculate grid layout
-    n_cols = min(3, n_configs)
-    n_rows = (n_configs + n_cols - 1) // n_cols
+    # Calculate grid layout - force 2x2 for 4 configs
+    if n_configs == 4:
+        n_cols = 2
+        n_rows = 2
+    else:
+        n_cols = min(3, n_configs)
+        n_rows = (n_configs + n_cols - 1) // n_cols
     
     if figsize is None:
         figsize = (6 * n_cols, 5 * n_rows)
@@ -649,12 +653,17 @@ def plot_comparison(
     for idx in range(len(config_names), len(ax_flat)):
         ax_flat[idx].set_visible(False)
     
-    # Add shared legend
+    # Add shared legend in top right with space
     handles, labels_legend = ax_flat[0].get_legend_handles_labels()
-    fig.legend(handles, labels_legend, loc='center right', fontsize=9, framealpha=0.9)
     
-    plt.suptitle('SOARA Ablation: t-SNE Embedding Comparison', fontsize=14, fontweight='bold', y=1.02)
-    plt.tight_layout()
+    plt.suptitle('SOARA Ablation: t-SNE Embedding Comparison', fontsize=14, fontweight='bold')
+    
+    # Adjust layout to create space for legend at top right
+    plt.subplots_adjust(top=0.92, bottom=0.08, right=0.85, left=0.08, hspace=0.3, wspace=0.3)
+    
+    # Place legend in top right outside the plot area
+    fig.legend(handles, labels_legend, loc='upper right', bbox_to_anchor=(0.98, 0.98), 
+               fontsize=9, framealpha=0.9)
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
     

@@ -12,7 +12,7 @@ from pathlib import Path
 # Settings
 LOG_DIR = "/home/chandan/test_current/outputs/rank_ablation"
 OUTPUT_DIR = "/home/chandan/test_current/outputs/rank_ablation/plots"
-DATASETS = ["cifar100", "dtd", "sun397"]
+DATASETS = ["cifar100", "dtd", "sun397", "fer2013", "fgvc_aircraft"]
 RANKS = [2, 4, 8, 16]
 COLORS = {2: '#e74c3c', 4: '#f39c12', 8: '#27ae60', 16: '#3498db'}
 LABELS = {2: 'Rank 2', 4: 'Rank 4', 8: 'Rank 8', 16: 'Rank 16'}

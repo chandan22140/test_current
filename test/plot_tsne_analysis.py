@@ -32,6 +32,7 @@ from matplotlib.colors import to_rgba
 import torchvision
 import torchvision.transforms as transforms
 from sklearn.manifold import TSNE
+from sklearn.metrics import silhouette_samples, silhouette_score
 from transformers import ViTForImageClassification
 
 # Import TrainingConfig and SOARA components to allow proper checkpoint loading
@@ -48,10 +49,11 @@ try:
     __main__.TrainingConfig = TrainingConfig
     SOARA_AVAILABLE = True
 except ImportError:
-    # If running from a different directory, try adding the script dir to path
+    # If running from a different directory, try adding the project root to path
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    if script_dir not in sys.path:
-        sys.path.insert(0, script_dir)
+    project_root = os.path.dirname(script_dir)
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
     try:
         from train_vit_rotational import TrainingConfig
         from rotational_pissa_unified import (
@@ -158,7 +160,7 @@ class EmbeddingExtractor:
 # =============================================================================
 
 def get_fgvc_test_loader(
-    data_path: str = "./data",
+    data_path: str = "../data",
     selected_classes: List[int] = None,
     batch_size: int = 32,
     num_workers: int = 4
@@ -231,8 +233,8 @@ def get_fgvc_test_loader(
     return dataloader, class_names
 
 
-def get_best_ratio_classes(data_path: str = "./data") -> Tuple[List[int], List[str]]:
-    selected_classes = [71, 92, 82, 62, 72]
+def get_best_ratio_classes(data_path: str = "../data") -> Tuple[List[int], List[str]]:
+    selected_classes = [57, 71, 92, 90, 83]
     
     # Load dataset to get class names
     temp_dataset = torchvision.datasets.FGVCAircraft(
@@ -248,7 +250,7 @@ def get_best_ratio_classes(data_path: str = "./data") -> Tuple[List[int], List[s
 
 def select_top_accuracy_classes(
     model: nn.Module,
-    data_path: str = "./data",
+    data_path: str = "../data",
     n_classes: int = 5,
     device: str = "cuda"
 ) -> Tuple[List[int], List[str]]:
@@ -314,7 +316,7 @@ def select_top_accuracy_classes(
     return top_classes, [all_class_names[c] for c in top_classes]
 
 
-def select_diverse_classes(data_path: str = "./data", n_classes: int = 5, seed: int = 42) -> List[int]:
+def select_diverse_classes(data_path: str = "../data", n_classes: int = 5, seed: int = 42) -> List[int]:
     """
     Select N diverse classes from FGVC Aircraft for visualization.
     DEPRECATED: Use select_top_accuracy_classes instead.
@@ -525,7 +527,8 @@ def plot_tsne(
     title: str,
     output_path: str,
     figsize: Tuple[int, int] = (10, 8),
-    colors: List[str] = None
+    colors: List[str] = None,
+    show_legend: bool = False
 ):
     """
     Create t-SNE scatter plot with class colors.
@@ -534,12 +537,16 @@ def plot_tsne(
         tsne_coords: (N, 2) array of 2D coordinates
         labels: (N,) array of class labels
         class_names: List of class names
-        title: Plot title
+        title: Plot title (ignored, kept for compatibility)
         output_path: Path to save the plot
         figsize: Figure size
         colors: Optional list of colors for each class
+        show_legend: Whether to show the legend (default False)
     """
     n_classes = len(class_names)
+    
+    # LARGE font size
+    FONT_SIZE = 22
     
     # Use a colormap if colors not provided
     if colors is None:
@@ -561,16 +568,19 @@ def plot_tsne(
             linewidths=0.5
         )
     
-    ax.set_xlabel('t-SNE Dimension 1', fontsize=12)
-    ax.set_ylabel('t-SNE Dimension 2', fontsize=12)
-    ax.set_title(title, fontsize=14, fontweight='bold')
-    ax.legend(loc='best', fontsize=9, framealpha=0.9)
-    ax.grid(True, alpha=0.3)
+    # NO TITLE, NO GRID, LARGE FONTS
+    ax.set_xlabel('t-SNE Dimension 1', fontsize=FONT_SIZE)
+    ax.set_ylabel('t-SNE Dimension 2', fontsize=FONT_SIZE)
+    ax.tick_params(labelsize=FONT_SIZE)
     
+    # Only show legend for way1_bf_seq (bold and bigger)
+    if show_legend:
+        ax.legend(loc='upper right', framealpha=0.9, prop={'weight': 'bold', 'size': 20}, borderpad=1, labelspacing=1)
+
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
-    
+
     print(f"Saved t-SNE plot to: {output_path}")
 
 
@@ -591,6 +601,9 @@ def plot_comparison(
     """
     n_configs = len(all_tsne_data)
     n_classes = len(class_names)
+    
+    # LARGE font size
+    FONT_SIZE = 22
     
     # Calculate grid layout - force 2x2 for 4 configs
     if n_configs == 4:
@@ -644,26 +657,27 @@ def plot_comparison(
                 linewidths=0.3
             )
         
-        ax.set_title(config_name, fontsize=11, fontweight='bold')
-        ax.set_xlabel('t-SNE 1', fontsize=9)
-        ax.set_ylabel('t-SNE 2', fontsize=9)
-        ax.grid(True, alpha=0.3)
+        # NO TITLE, NO GRID, LARGE FONTS
+        ax.set_xlabel('t-SNE 1', fontsize=FONT_SIZE)
+        ax.set_ylabel('t-SNE 2', fontsize=FONT_SIZE)
+        ax.tick_params(labelsize=FONT_SIZE)
     
     # Hide unused axes
     for idx in range(len(config_names), len(ax_flat)):
         ax_flat[idx].set_visible(False)
     
-    # Add shared legend in top right with space
+    # Add shared legend in top right with space (only on first subplot)
     handles, labels_legend = ax_flat[0].get_legend_handles_labels()
     
-    plt.suptitle('SOARA Ablation: t-SNE Embedding Comparison', fontsize=14, fontweight='bold')
+    # NO SUPTITLE
     
     # Adjust layout to create space for legend at top right
     plt.subplots_adjust(top=0.92, bottom=0.08, right=0.85, left=0.08, hspace=0.3, wspace=0.3)
     
-    # Place legend in top right outside the plot area
+    # Place legend in top right outside the plot area (bold and bigger)
+
     fig.legend(handles, labels_legend, loc='upper right', bbox_to_anchor=(0.98, 0.98), 
-               fontsize=9, framealpha=0.9)
+               framealpha=0.9, prop={'weight': 'bold', 'size': 20}, borderpad=1, labelspacing=1)
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
     
@@ -732,6 +746,66 @@ def compute_cluster_metrics(
     }
 
 
+    print("  - Higher cluster_ratio indicates better class separation")
+
+
+def find_best_clustering_classes(
+    model: nn.Module,
+    data_path: str,
+    device: str = "cuda",
+    layer_idx: int = -1,
+    top_k: int = 5
+) -> Tuple[List[int], List[str]]:
+    """
+    Find top K classes with best clustering quality (Silhouette score).
+    """
+    print(f"\nAnalyzing all classes to find top {top_k} with best clustering...")
+    
+    # Get loader for all classes (with original labels)
+    loader, class_names = get_fgvc_test_loader(
+        data_path=data_path,
+        selected_classes=None,  # Load all classes
+        batch_size=32,
+        num_workers=4
+    )
+    
+    extractor = EmbeddingExtractor(model, device, layer_idx=layer_idx)
+    # Extract all samples
+    print(f"  Extracting embeddings for all {len(class_names)} classes...")
+    embeddings, labels = extractor.extract(loader, max_samples=None)
+    
+    print(f"  Computing silhouette scores for {len(labels)} samples...")
+    
+    # Compute silhouette scores for each sample
+    # This might be slow for very large N, but for FGVC (3333 images) it's fine
+    sample_silhouette_values = silhouette_samples(embeddings, labels)
+    
+    class_silhouette_scores = {}
+    for i in range(len(class_names)):
+        # Aggregate scores for samples belonging to class i
+        class_mask = (labels == i)
+        if np.sum(class_mask) == 0:
+            continue
+        avg_score = np.mean(sample_silhouette_values[class_mask])
+        class_silhouette_scores[i] = avg_score
+        
+    # Sort by score
+    sorted_classes = sorted(class_silhouette_scores.items(), key=lambda x: x[1], reverse=True)
+    
+    top_classes_indices = [x[0] for x in sorted_classes[:top_k]]
+    
+    print(f"\n  Top {top_k} classes by Avg Silhouette Score:")
+    print(f"  {'Class ID':<10} {'Name':<30} {'Score':<10}")
+    print(f"  {'-'*10} {'-'*30} {'-'*10}")
+    
+    for idx in top_classes_indices:
+        name = class_names[idx]
+        score = class_silhouette_scores[idx]
+        print(f"  {idx:<10} {name:<30} {score:.4f}")
+        
+    return top_classes_indices, [class_names[i] for i in top_classes_indices]
+
+
 # =============================================================================
 # MAIN
 # =============================================================================
@@ -752,15 +826,15 @@ def main():
                        help='Output directory for plots')
     
     # Data options
-    parser.add_argument('--data-path', type=str, default='./data',
-                       help='Path to data directory')
+    parser.add_argument('--data-path', type=str, default='../data',
+                        help='Path to dataset root (default: ../data)')
     parser.add_argument('--n-classes', type=int, default=5,
                        help='Number of classes to visualize')
     parser.add_argument('--max-samples', type=int, default=500,
-                       help='Maximum samples to use for t-SNE')
+                       help='Maximum samples per class to use for t-SNE plot')
     parser.add_argument('--perplexity', type=int, default=30,
                        help='t-SNE perplexity')
-    parser.add_argument('--layer-idx', type=int, default=6,
+    parser.add_argument('--layer-idx', type=int, default=1,
                        help='ViT layer to extract embeddings from (-1=final, 0=patch embed, 1-12=transformer blocks, 6=middle recommended)')
     
     # Other options
@@ -768,6 +842,9 @@ def main():
                        help='Device to use (cuda/cpu)')
     parser.add_argument('--seed', type=int, default=42,
                        help='Random seed')
+    
+    parser.add_argument('--use-hardcoded-best', action='store_true',
+                       help='Use hardcoded best clustering classes (DH-82, Eurofighter, Il-76, SR-20, Spitfire)')
     
     args = parser.parse_args()
     
@@ -817,11 +894,40 @@ def main():
     for name, path in checkpoints.items():
         print(f"  {name}: {path}")
     
-    # Use pre-computed top 5 classes by inter/intra cluster ratio
-    selected_classes, class_names = get_best_ratio_classes(args.data_path)
+    if args.use_hardcoded_best:
+        print("\nUsing hardcoded best clustering classes...")
+        selected_classes = [57, 71, 83, 92, 95]
+        # We need class names, but we can get them when loading the dataset
+        # Create a dummy call to get class names is not efficient, 
+        # but get_fgvc_test_loader handles class name retrieval for selected classes.
+        
+    else:
+        # Use the first checkpoint to determine best classes
+        first_ckpt_name, first_ckpt_path = next(iter(checkpoints.items()))
+        print(f"\nUsing checkpoint '{first_ckpt_name}' to select top {args.n_classes} best clustering classes...")
+        
+        # Load model for selection
+        try:
+            model, _ = load_model_from_checkpoint(first_ckpt_path, args.device)
+            
+            # Use provided layer_idx for selection too, to be consistent
+            selected_classes, class_names = find_best_clustering_classes(
+                model, args.data_path, args.device, 
+                layer_idx=args.layer_idx, top_k=args.n_classes
+            )
+            
+            # Free model memory
+            del model
+            torch.cuda.empty_cache()
+            
+        except Exception as e:
+            print(f"Error during class selection: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
     
     # Load test data with selected classes
-    print("\nLoading FGVC Aircraft test data...")
+    print("\nLoading FGVC Aircraft test data (selected classes)...")
     test_loader, class_names = get_fgvc_test_loader(
         data_path=args.data_path,
         selected_classes=selected_classes,
@@ -867,11 +973,14 @@ def main():
         all_tsne_data[config_name] = (tsne_coords, labels)
         
         # Save individual plot
+        # Show legend only for way1_bf_seq (butterfly sequential)
+        show_legend = 'bf_seq' in config_name.lower() or 'butterfly' in config_name.lower() and 'seq' in config_name.lower()
         plot_path = os.path.join(args.output_dir, f'tsne_{config_name}.png')
         plot_tsne(
             tsne_coords, labels, class_names,
             title=f't-SNE: {config_name}',
-            output_path=plot_path
+            output_path=plot_path,
+            show_legend=show_legend
         )
         
         # Clean up

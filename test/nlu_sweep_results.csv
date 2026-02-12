@@ -1,0 +1,25 @@
+Dataset,Variant,orthogonality_weight,weight_decay,learning_rate,rank,epoch,batch_size,lr_ratio_s,total_cycles,test_metric,run_url
+MRPC,way1 BF Seq,,0.0003095301931166494,0.03574555635707561,768,20,32,,,0.9243034055727556,https://wandb.ai/chandan22140-indraprastha-institute-of-information-techn/glue-deberta-mrpc-butterfly-sequential/runs/buodmnlx
+MRPC,way0,0.021380018038677374,0.00014783955661151004,0.00032486887442645526,64,15,32,,,0.932515762488741,https://wandb.ai/chandan22140-indraprastha-institute-of-information-techn/glue-deberta-mrpc/runs/1nsly5sd
+MRPC,way1,,0.0005679146685946658,0.0009461908285373828,85,15,32,,5.0,0.8422368947579031,https://wandb.ai/chandan22140-indraprastha-institute-of-information-techn/glue-deberta-mrpc/runs/0rpyhq18
+QNLI,way1 BF Seq,,0.0005802809389364828,0.0010050722535617238,768,15,32,,,0.9359326377448288,https://wandb.ai/chandan22140-indraprastha-institute-of-information-techn/glue-deberta-qnli-butterfly-sequential/runs/t6hw3a5m
+QNLI,way0,0.030419379792522284,1.211770548198276e-05,9.50452197162242e-05,64,10,16,,,0.940691927512356,https://wandb.ai/chandan22140-indraprastha-institute-of-information-techn/glue-deberta-qnli/runs/7lpsikwv
+QNLI,way1,,2.2319736382959883e-05,0.000465939803636963,85,12,32,,5.0,0.9024345597656964,https://wandb.ai/chandan22140-indraprastha-institute-of-information-techn/glue-deberta-qnli/runs/1ac5robn
+RTE,way1 BF Seq,,0.00010660249646446856,0.007921506584834032,768,40,32,,,0.8592057761732852,https://wandb.ai/chandan22140-indraprastha-institute-of-information-techn/glue-deberta-rte-butterfly-sequential/runs/2hrp7ix4
+RTE,way0,0.004606645874189554,0.00033147829336148594,0.0004016519033908587,64,50,32,,,0.8628158844765343,https://wandb.ai/chandan22140-indraprastha-institute-of-information-techn/glue-deberta-rte/runs/l96ufjte
+RTE,way1,,0.003188464859981651,0.0007931494644661235,85,50,32,,5.0,0.7725631768953068,https://wandb.ai/chandan22140-indraprastha-institute-of-information-techn/glue-deberta-rte/runs/hne6bemv
+COLA,way1 BF Seq,,0.00020999024991365592,0.007399167518195619,768,25,32,,,0.702655441635169,https://wandb.ai/chandan22140-indraprastha-institute-of-information-techn/glue-deberta-cola-butterfly-sequential/runs/uz42rcvx
+COLA,way0,0.020797158309418123,0.00042101367699915794,0.0002341952611286501,64,20,16,,,0.7182514511816681,https://wandb.ai/chandan22140-indraprastha-institute-of-information-techn/glue-deberta-cola/runs/6oeicq2e
+COLA,way1,,0.0012761068100404453,0.0008747813793364406,85,20,32,,5.0,0.6031465729998459,https://wandb.ai/chandan22140-indraprastha-institute-of-information-techn/glue-deberta-cola/runs/9g3o7hjp
+STSB,way1 BF Seq,,0.0048704508846501675,0.008639215522541214,768,19,32,,,0.918242583000436,https://wandb.ai/chandan22140-indraprastha-institute-of-information-techn/glue-deberta-stsb-butterfly-sequential/runs/2eheozy6
+STSB,way0,0.03819236884012281,1.8645912953542424e-05,0.0004249096830498667,64,25,16,,,0.9163336592267268,https://wandb.ai/chandan22140-indraprastha-institute-of-information-techn/glue-deberta-stsb/runs/pa6k8n24
+STSB,way1,,9.98396095959143e-05,0.0009808247676890186,85,25,32,,5.0,0.8944279088403373,https://wandb.ai/chandan22140-indraprastha-institute-of-information-techn/glue-deberta-stsb/runs/ijo4k3no
+SST2,way1 BF Seq,,0.00018643249940568789,0.002246118161263627,768,19,32,,,0.9495412844036696,https://wandb.ai/chandan22140-indraprastha-institute-of-information-techn/glue-deberta-sst2-butterfly-sequential/runs/9f9pc0p1
+SST2,way0,0.04527534387400064,1.686471696307471e-05,8.343896841871532e-05,85,15,32,,,0.9587155963302753,https://wandb.ai/chandan22140-indraprastha-institute-of-information-techn/glue-deberta-sst2/runs/53x74de1
+SST2,way1,,8.14617204214442e-05,0.0008955766923960914,85,15,32,,5.0,0.9392201834862384,https://wandb.ai/chandan22140-indraprastha-institute-of-information-techn/glue-deberta-sst2/runs/jpgtcpp2
+MNLI,way1 BF Seq,,0.001597464335057295,0.002492306030718329,768,15,32,,,0.8912888436067244,https://wandb.ai/chandan22140-indraprastha-institute-of-information-techn/glue-deberta-mnli-butterfly-sequential/runs/5yr9jldo
+MNLI,way0,0.04659450946805197,5.436949336712121e-05,0.0001508537169036439,85,11,32,,,0.8989302088639837,https://wandb.ai/chandan22140-indraprastha-institute-of-information-techn/glue-deberta-mnli/runs/nn1y479i
+MNLI,way1,,0.001597464335057295,0.002492306030718329,768,15,32,,,0.8912888436067244,https://wandb.ai/chandan22140-indraprastha-institute-of-information-techn/glue-deberta-mnli-butterfly-sequential/runs/5yr9jldo
+QQP,way1 BF Seq,,0.00012220946873506074,0.002327463898293639,768,19,32,,,0.8930186784830159,https://wandb.ai/chandan22140-indraprastha-institute-of-information-techn/glue-deberta-qqp-butterfly-sequential/runs/l9w516ki
+QQP,way0,0.056796628779595154,0.0002616164039770371,0.00017789917359265932,85,15,32,,,0.9010412533351576,https://wandb.ai/chandan22140-indraprastha-institute-of-information-techn/glue-deberta-qqp/runs/bupjfd3b
+QQP,way1,,0.0004275021163591344,0.0003004062891004991,85,15,32,,5.0,0.8553765482734139,https://wandb.ai/chandan22140-indraprastha-institute-of-information-techn/glue-deberta-qqp/runs/ov6z2loy

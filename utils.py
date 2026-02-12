@@ -266,10 +266,10 @@ def train_text_to_text_model(
         seed=kwargs.get("seed", 42),
         ddp_find_unused_parameters=False,
         save_safetensors=False,
-        dataloader_num_workers=12,  # Increased from 12 to maximize CPU utilization
-        # dataloader_prefetch_factor=4,  # Prefetch 4 batches per worker (96 batches total)
+        dataloader_num_workers=24,  # Increased from 12 to maximize CPU utilization
+        dataloader_prefetch_factor=4,  # Prefetch 4 batches per worker (96 batches total)
         dataloader_pin_memory=True,
-        # dataloader_persistent_workers=True,  # Keep workers alive between epochs
+        dataloader_persistent_workers=True,  # Keep workers alive between epochs
         **kwargs.get("training_args", {}),
     )
 

@@ -1,0 +1,128 @@
+<mxfile host="app.diagrams.net">
+  <diagram name="SOARA General" id="general">
+    <mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="1" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        
+        <!-- Title -->
+        <mxCell id="title" value="&lt;b style=&quot;font-size:16px&quot;&gt;SOARA: General Architecture&lt;/b&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="50" y="20" width="300" height="30" as="geometry" />
+        </mxCell>
+        
+        <!-- Input vectors -->
+        <mxCell id="h_input" value="&lt;b&gt;h&lt;/b&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="50" y="80" width="150" height="30" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="x_input" value="&lt;b&gt;x&lt;/b&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="50" y="300" width="150" height="30" as="geometry" />
+        </mxCell>
+        
+        <!-- dim labels -->
+        <mxCell id="dimout_label" value="dim&lt;sub&gt;out&lt;/sub&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="50" y="50" width="60" height="20" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="dimin_label" value="dim&lt;sub&gt;in&lt;/sub&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="50" y="340" width="60" height="20" as="geometry" />
+        </mxCell>
+        
+        <!-- Matrix U -->
+        <mxCell id="U_matrix" value="&lt;b&gt;U&lt;/b&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#6FA8DC;strokeColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="60" y="130" width="110" height="80" as="geometry" />
+        </mxCell>
+        
+        <!-- Diagonal Sigma -->
+        <mxCell id="sigma_top" value="" style="shape=triangle;direction=north;whiteSpace=wrap;html=1;fillColor=#E0E0E0;strokeColor=#000000;rotation=45;" vertex="1" parent="1">
+          <mxGeometry x="30" y="150" width="80" height="80" as="geometry" />
+        </mxCell>
+        
+        <!-- Matrix M (trainable rotation) -->
+        <mxCell id="M_matrix" value="&lt;b&gt;M&lt;/b&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFB366;strokeColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="125" y="170" width="90" height="90" as="geometry" />
+        </mxCell>
+        
+        <!-- Matrix V^T -->
+        <mxCell id="VT_matrix" value="&lt;b&gt;V&lt;sup&gt;T&lt;/sup&gt;&lt;/b&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#6FA8DC;strokeColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="60" y="230" width="110" height="50" as="geometry" />
+        </mxCell>
+        
+        <!-- Arrow to instantiations -->
+        <mxCell id="arrow1" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;exitDx=0;exitDy=0;" edge="1" parent="1" source="M_matrix">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="230" y="215" as="sourcePoint" />
+            <mxPoint x="280" y="215" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        
+        <!-- Instantiations of M label -->
+        <mxCell id="inst_label" value="&lt;b style=&quot;font-size:14px&quot;&gt;Instantiations of M&lt;/b&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="400" y="50" width="300" height="30" as="geometry" />
+        </mxCell>
+        
+        <!-- Plain matrix pattern (8x8 grid as example) -->
+        <mxCell id="plain_label" value="&lt;b&gt;Plain (V1)&lt;/b&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="280" y="85" width="100" height="20" as="geometry" />
+        </mxCell>
+        
+        <!-- Grid representation for Plain - full trainable -->
+        <mxCell id="plain_grid" value="" style="group" vertex="1" connectable="0" parent="1">
+          <mxGeometry x="280" y="110" width="100" height="100" as="geometry" />
+        </mxCell>
+        
+        <!-- Banded matrix pattern -->
+        <mxCell id="banded_label" value="&lt;b&gt;Banded (V2a)&lt;/b&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="400" y="85" width="120" height="20" as="geometry" />
+        </mxCell>
+        
+        <!-- Grid representation for Banded -->
+        <mxCell id="banded_grid" value="" style="group" vertex="1" connectable="0" parent="1">
+          <mxGeometry x="410" y="110" width="100" height="100" as="geometry" />
+        </mxCell>
+        
+        <!-- Butterfly/Sequential pattern -->
+        <mxCell id="butterfly_label" value="&lt;b&gt;Butterfly (V2b)&lt;/b&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="540" y="85" width="120" height="20" as="geometry" />
+        </mxCell>
+        
+        <!-- Grid representation for Butterfly -->
+        <mxCell id="butterfly_grid" value="" style="group" vertex="1" connectable="0" parent="1">
+          <mxGeometry x="550" y="110" width="100" height="100" as="geometry" />
+        </mxCell>
+        
+        <!-- Legend -->
+        <mxCell id="legend_box" value="" style="rectangle;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#000000;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="50" y="390" width="220" height="90" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="legend_frozen" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#6FA8DC;strokeColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="60" y="400" width="30" height="15" as="geometry" />
+        </mxCell>
+        <mxCell id="legend_frozen_text" value="= frozen" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="95" y="397" width="80" height="20" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="legend_trainable" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFB366;strokeColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="60" y="425" width="30" height="15" as="geometry" />
+        </mxCell>
+        <mxCell id="legend_trainable_text" value="= trainable" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="95" y="422" width="80" height="20" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="legend_zeros" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="60" y="450" width="30" height="15" as="geometry" />
+        </mxCell>
+        <mxCell id="legend_zeros_text" value="= zeros" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="95" y="447" width="80" height="20" as="geometry" />
+        </mxCell>
+        
+        <!-- Mathematical equation -->
+        <mxCell id="equation" value="W = U ⊕ R&lt;sub&gt;U&lt;/sub&gt; ⊕ Σ ⊕ R&lt;sub&gt;V&lt;/sub&gt;&lt;sup&gt;T&lt;/sup&gt; ⊕ V&lt;sup&gt;T&lt;/sup&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontStyle=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="300" y="250" width="350" height="30" as="geometry" />
+        </mxCell>
+        
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

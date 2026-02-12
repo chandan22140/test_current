@@ -60,9 +60,7 @@ def parse_log_file(log_path):
 
 
 def plot_cycles_convergence(log_dir, output_dir):
-    """Create 2x2 subplot showing all 4 metrics across different num_cycles."""
-    
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    """Create 4 individual plots showing each metric across different num_cycles."""
     
     # Collect data for all cycles
     all_data = {}
@@ -78,91 +76,97 @@ def plot_cycles_convergence(log_dir, output_dir):
     
     if not all_data:
         print("  No data found for any cycle configuration!")
-        plt.close()
         return None
     
-    # Plot 1: Train Loss
-    ax = axes[0, 0]
+    os.makedirs(output_dir, exist_ok=True)
+    output_paths = []
+    
+    # LARGE font size (as big as title would be)
+    FONT_SIZE = 22
+    
+    # Plot 1: Train Loss (NO LEGEND, NO GRID, NO TITLE)
+    plt.figure(figsize=(8, 6))
     for cycles in CYCLES:
         if cycles in all_data:
             epochs = list(range(1, len(all_data[cycles]['train_loss']) + 1))
-            ax.plot(epochs, all_data[cycles]['train_loss'],
+            plt.plot(epochs, all_data[cycles]['train_loss'],
                    color=COLORS[cycles],
                    label=LABELS[cycles],
                    linewidth=2,
                    marker='o',
                    markersize=3)
-    ax.set_title('Training Loss', fontsize=12, fontweight='bold')
-    ax.set_xlabel('Epoch', fontsize=10)
-    ax.set_ylabel('Loss', fontsize=10)
-    ax.legend(loc='best', fontsize=9)
-    ax.grid(True, alpha=0.3)
+    plt.xlabel('Epoch', fontsize=FONT_SIZE)
+    plt.ylabel('Loss', fontsize=FONT_SIZE)
+    plt.tick_params(labelsize=FONT_SIZE)
+    output_path = os.path.join(output_dir, f"train_loss_{DATASET}_{METHOD}.png")
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    output_paths.append(output_path)
+    print(f"\n  Saved: {output_path}")
     
-    # Plot 2: Train Accuracy
-    ax = axes[0, 1]
+    # Plot 2: Train Accuracy (WITH LEGEND, NO GRID, NO TITLE)
+    plt.figure(figsize=(8, 6))
     for cycles in CYCLES:
         if cycles in all_data:
             epochs = list(range(1, len(all_data[cycles]['train_acc']) + 1))
-            ax.plot(epochs, all_data[cycles]['train_acc'],
+            plt.plot(epochs, all_data[cycles]['train_acc'],
                    color=COLORS[cycles],
                    label=LABELS[cycles],
                    linewidth=2,
                    marker='o',
                    markersize=3)
-    ax.set_title('Training Accuracy', fontsize=12, fontweight='bold')
-    ax.set_xlabel('Epoch', fontsize=10)
-    ax.set_ylabel('Accuracy (%)', fontsize=10)
-    ax.legend(loc='best', fontsize=9)
-    ax.grid(True, alpha=0.3)
+    plt.xlabel('Epoch', fontsize=FONT_SIZE)
+    plt.ylabel('Accuracy (%)', fontsize=FONT_SIZE)
+    plt.tick_params(labelsize=FONT_SIZE)
+    plt.legend(loc='lower right', prop={'weight': 'bold', 'size': 20}, borderpad=1, labelspacing=1)
+    output_path = os.path.join(output_dir, f"train_accuracy_{DATASET}_{METHOD}.png")
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    output_paths.append(output_path)
+    print(f"  Saved: {output_path}")
     
-    # Plot 3: Val Loss
-    ax = axes[1, 0]
+    # Plot 3: Val Loss (WITH LEGEND at top right, NO GRID, NO TITLE)
+    plt.figure(figsize=(8, 6))
     for cycles in CYCLES:
         if cycles in all_data:
             epochs = list(range(1, len(all_data[cycles]['val_loss']) + 1))
-            ax.plot(epochs, all_data[cycles]['val_loss'],
+            plt.plot(epochs, all_data[cycles]['val_loss'],
                    color=COLORS[cycles],
                    label=LABELS[cycles],
                    linewidth=2,
                    marker='o',
                    markersize=3)
-    ax.set_title('Validation Loss', fontsize=12, fontweight='bold')
-    ax.set_xlabel('Epoch', fontsize=10)
-    ax.set_ylabel('Loss', fontsize=10)
-    ax.legend(loc='best', fontsize=9)
-    ax.grid(True, alpha=0.3)
+    plt.xlabel('Epoch', fontsize=FONT_SIZE)
+    plt.ylabel('Loss', fontsize=FONT_SIZE)
+    plt.tick_params(labelsize=FONT_SIZE)
+    plt.legend(loc='upper right', prop={'weight': 'bold', 'size': 20}, borderpad=1, labelspacing=1)
+    output_path = os.path.join(output_dir, f"val_loss_{DATASET}_{METHOD}.png")
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    output_paths.append(output_path)
+    print(f"  Saved: {output_path}")
     
-    # Plot 4: Val Accuracy
-    ax = axes[1, 1]
+    # Plot 4: Val Accuracy (NO LEGEND, NO GRID, NO TITLE)
+    plt.figure(figsize=(8, 6))
     for cycles in CYCLES:
         if cycles in all_data:
             epochs = list(range(1, len(all_data[cycles]['val_acc']) + 1))
-            ax.plot(epochs, all_data[cycles]['val_acc'],
+            plt.plot(epochs, all_data[cycles]['val_acc'],
                    color=COLORS[cycles],
                    label=LABELS[cycles],
                    linewidth=2,
                    marker='o',
                    markersize=3)
-    ax.set_title('Validation Accuracy', fontsize=12, fontweight='bold')
-    ax.set_xlabel('Epoch', fontsize=10)
-    ax.set_ylabel('Accuracy (%)', fontsize=10)
-    ax.legend(loc='best', fontsize=9)
-    ax.grid(True, alpha=0.3)
-    
-    # Overall title
-    fig.suptitle(f'{DATASET.upper()} - Num Cycles Ablation ({METHOD.upper()}, Rank 16, 20 Epochs)',
-                fontsize=14, fontweight='bold', y=0.995)
-    
-    plt.tight_layout()
-    
-    # Save plot
-    os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, f"cycles_convergence_{DATASET}_{METHOD}.png")
+    plt.xlabel('Epoch', fontsize=FONT_SIZE)
+    plt.ylabel('Accuracy (%)', fontsize=FONT_SIZE)
+    plt.tick_params(labelsize=FONT_SIZE)
+    output_path = os.path.join(output_dir, f"val_accuracy_{DATASET}_{METHOD}.png")
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
+    output_paths.append(output_path)
+    print(f"  Saved: {output_path}")
     
-    print(f"\n  Saved: {output_path}")
-    return output_path
+    return output_paths
 
 
 def print_summary(log_dir):

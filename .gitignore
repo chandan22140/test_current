@@ -16,3 +16,6 @@ snapshot/
 wandb/
 data/
 *.tar.gz
+
+# Telegram Bot
+telegram_bot/

@@ -41,6 +41,9 @@ def plot_dataset_convergence(dataset, log_dir, output_dir):
     
     plt.figure(figsize=(8, 6))
     
+    # LARGE font size (as big as title would be)
+    FONT_SIZE = 22
+    
     all_vals = []
     found_data = False
     for rank in RANKS:
@@ -64,13 +67,15 @@ def plot_dataset_convergence(dataset, log_dir, output_dir):
         plt.close()
         return None
     
-    # Formatting
-    dataset_display = dataset.upper().replace('_', ' ')
-    plt.title(f'{dataset_display} - Validation Accuracy Convergence', fontsize=14, fontweight='bold')
-    plt.xlabel('Epoch', fontsize=12)
-    plt.ylabel('Validation Accuracy (%)', fontsize=12)
-    plt.legend(loc='lower right', fontsize=10)
-    plt.grid(True, alpha=0.3)
+    # NO TITLE, NO GRID
+    plt.xlabel('Epoch', fontsize=FONT_SIZE)
+    plt.ylabel('Validation Accuracy (%)', fontsize=FONT_SIZE)
+    plt.tick_params(labelsize=FONT_SIZE)
+    
+    # Add legend ONLY for DTD dataset (bold and bigger)
+    if dataset.lower() == 'dtd':
+        plt.legend(loc='lower right', prop={'weight': 'bold', 'size': 20}, borderpad=1, labelspacing=1)
+    
     plt.xlim(0.5, None)
     # Dynamic limits
     if all_vals:
@@ -90,59 +95,6 @@ def plot_dataset_convergence(dataset, log_dir, output_dir):
     return output_path
 
 
-def create_combined_plot(log_dir, output_dir):
-    """Create a 2x3 combined plot with all datasets."""
-    
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    axes = axes.flatten()
-    
-    for idx, dataset in enumerate(DATASETS):
-        ax = axes[idx]
-        dataset_vals = []
-        
-        for rank in RANKS:
-            log_path = os.path.join(log_dir, f"train_{dataset}_r{rank}.log")
-            val_accs = parse_log_file(log_path)
-            
-            if val_accs:
-                epochs = list(range(1, len(val_accs) + 1))
-                ax.plot(epochs, val_accs,
-                       color=COLORS[rank],
-                       label=LABELS[rank],
-                       linewidth=1.5,
-                       marker='o',
-                       markersize=3)
-                dataset_vals.extend(val_accs)
-        
-        dataset_display = dataset.upper().replace('_', ' ')
-        ax.set_title(dataset_display, fontsize=12, fontweight='bold')
-        ax.set_xlabel('Epoch', fontsize=10)
-        ax.set_ylabel('Val Accuracy (%)', fontsize=10)
-        ax.legend(loc='lower right', fontsize=8)
-        ax.grid(True, alpha=0.3)
-        # Dynamic limits
-        if dataset_vals:
-            y_min = max(0, min(dataset_vals)) * 0.995
-            y_max = min(100, max(dataset_vals)) * 1.005
-            ax.set_ylim(y_min, y_max)
-        else:
-            ax.set_ylim(0, 100)
-    
-    # Hide unused subplot
-    axes[5].axis('off')
-    
-    plt.suptitle('Rank Ablation: Validation Accuracy Convergence', fontsize=16, fontweight='bold')
-    plt.tight_layout()
-    
-    output_path = os.path.join(output_dir, "convergence_all_datasets.png")
-    os.makedirs(output_dir, exist_ok=True)
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    plt.close()
-    
-    print(f"\nSaved combined plot: {output_path}")
-    return output_path
-
-
 def main():
     print("=" * 60)
     print("Rank Ablation Convergence Plots")
@@ -152,10 +104,6 @@ def main():
     for dataset in DATASETS:
         print(f"\n{dataset.upper()}:")
         plot_dataset_convergence(dataset, LOG_DIR, OUTPUT_DIR)
-    
-    # Create combined plot
-    print("\nCreating combined plot...")
-    create_combined_plot(LOG_DIR, OUTPUT_DIR)
     
     print("\n" + "=" * 60)
     print("Done!")

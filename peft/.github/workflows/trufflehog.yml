@@ -1,0 +1,18 @@
+on:
+  push:
+
+name: Secret Leaks
+
+permissions: {}
+
+jobs:
+  trufflehog:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8  # v6.0.1
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Secret Scanning
+      uses: trufflesecurity/trufflehog@0f58ae7c5036094a1e3e750d18772af92821b503  # v3.90.5

@@ -1,12 +1,12 @@
 """
-Training script for ViT with Rotational PiSSA
+Training script for ViT with SOARA
 ==============================================
 
 This script demonstrates training ViT models on multiple datasets using all 4 rotational methods:
-- Way 0: Direct parameterization with regularization
-- Way 1: Greedy sequential Givens rotations
-- Way 2: Low-rank symmetric perturbation
-- Way 3: Exponential map of skew-symmetric matrix
+- V1 (SOARA-V1): Direct parameterization with regularization
+- V2 (SOARA-V2): Greedy sequential Givens rotations
+- v3: Low-rank symmetric perturbation
+- V4: Exponential map of skew-symmetric matrix
 
 Supported Models:
 
@@ -20,13 +20,13 @@ Supported Datasets:
 
 Usage:
     # Train on CIFAR-100 with ViT-B/16
-    python train_vit_rotational.py --method way0 --dataset cifar100 --epochs 10
+    python train_vit_rotational.py --method v1 --dataset cifar100 --epochs 10
     
     # Train on Flowers102 with ViT-L/16
-    python train_vit_rotational.py --method way1 --dataset flowers102 --model vit_large_patch16_224 --epochs 20
+    python train_vit_rotational.py --method V2 --dataset flowers102 --model vit_large_patch16_224 --epochs 20
     
     # Train on Food101 with ViT-B/16
-    python train_vit_rotational.py --method way2 --dataset food101 --epochs 15
+    python train_vit_rotational.py --method v3 --dataset food101 --epochs 15
     
     # Train all methods
     python train_vit_rotational.py --method all --dataset cifar10 --epochs 5
@@ -66,12 +66,12 @@ import wandb
 import pandas as pd
 from PIL import Image
 
-# Import our rotational PiSSA modules
+# Import our SOARA modules
 from rotational_pissa_unified import (
-    RotationalPiSSAConfig,
-    RotationalLinearLayer,
-    replace_linear_with_rotational_pissa,
-    RotationalPiSSATrainer
+    SOARAConfig,
+    SOARALinearLayer,
+    replace_linear_with_soara,
+    SOARATrainer
 )
 from vram_profiler import (
     profile_model_memory, 
@@ -105,7 +105,7 @@ def set_seed(seed: int = 42):
 
 @dataclass
 class TrainingConfig:
-    """Configuration for ViT training with rotational PiSSA."""
+    """Configuration for ViT training with SOARA."""
     
     # Model configuration
     model_name: str = None
@@ -118,20 +118,20 @@ class TrainingConfig:
     weight_decay: float = 0
     warmup_epochs: float = 1.0
     
-    # Rotational PiSSA configuration
-    method: str = "way0"  # way0, way1, way2, way3, or 'all'
-    pissa_rank: int = 16
-    pissa_alpha: float = 32.0
-    lora_dropout: float = 0.0  # Dropout rate (should be 0 for PiSSA)
+    # SOARA configuration
+    method: str = "v1"  # v1, V2, v3, V4, or 'all'
+    soara_rank: int = 16
+    soara_alpha: float = 32.0
+    lora_dropout: float = 0.0  # Dropout rate (should be 0 for SOARA)
     orthogonality_weight: float = 1e-3
-    regularization_type: str = "frobenius"  # frobenius, determinant, log_determinant (Way 0 only)
-    steps_per_phase: int = 0   # For way1: 0 = auto-compute, >0 = manual override
-    total_cycles: int = 2      # For way1: how many full cycles through all Givens layers
-    low_rank_r: int = 4        # For way2/way3
+    regularization_type: str = "frobenius"  # frobenius, determinant, log_determinant (V1 (SOARA-V1) only)
+    steps_per_phase: int = 0   # For V2: 0 = auto-compute, >0 = manual override
+    total_cycles: int = 2      # For V2: how many full cycles through all Givens layers
+    low_rank_r: int = 4        # For v3/V4
     quantize_residual: bool = False  # Whether to NF4 quantize W_residual
     quantize_base_components: bool = False  # Whether to NF4 quantize U and V^T
     
-    # Way 1 Butterfly options
+    # V2 (SOARA-V2) Butterfly options
     use_butterfly: bool = False
     butterfly_sequential: bool = False
     butterfly_block_size: int = 2
@@ -156,7 +156,7 @@ class TrainingConfig:
     
     # Logging configuration
     use_wandb: bool = True
-    project_name: str = "rotational-pissa-vit"
+    project_name: str = "soara-vit"
     experiment_name: Optional[str] = None
     output_dir: str = "./outputs"
     save_checkpoints: bool = True
@@ -863,7 +863,7 @@ class ViTDataset:
 
 
 class ViTRotationalTrainer:
-    """Trainer for ViT with rotational PiSSA."""
+    """Trainer for ViT with SOARA."""
     
     def __init__(self, config: TrainingConfig):
         self.config = config
@@ -876,7 +876,7 @@ class ViTRotationalTrainer:
         # Initialize results storage
         self.results = {}
 
-        print(f"🚀 ViT Rotational PiSSA Trainer Initialized")
+        print(f"🚀 ViT SOARA Trainer Initialized")
         print(f"Device: {self.device}")
         try:
             train_n = len(self.train_loader.dataset)
@@ -908,8 +908,8 @@ class ViTRotationalTrainer:
         
         return device
     
-    def create_model(self, method: str) -> Tuple[nn.Module, Optional[RotationalPiSSATrainer]]:
-        """Create ViT model with rotational PiSSA adaptation."""
+    def create_model(self, method: str) -> Tuple[nn.Module, Optional[SOARATrainer]]:
+        """Create ViT model with SOARA adaptation."""
         
         # Load pre-trained ViT from HuggingFace with separate Q/K/V projections
         model = ViTForImageClassification.from_pretrained(
@@ -922,19 +922,19 @@ class ViTRotationalTrainer:
         print(f"Created {self.config.model_name} with {sum(p.numel() for p in model.parameters()):,} parameters")
         print(f"Note: Using HuggingFace model with separate query/key/value projections")
         
-        # Configure rotational PiSSA
-        if method == "way0":
-            pissa_config = RotationalPiSSAConfig(
-                r=self.config.pissa_rank,
-                lora_alpha=self.config.pissa_alpha,
+        # Configure SOARA
+        if method == "v1":
+            soara_config = SOARAConfig(
+                r=self.config.soara_rank,
+                lora_alpha=self.config.soara_alpha,
                 lora_dropout=self.config.lora_dropout,
-                method="way0",
+                method="v1",
                 orthogonality_reg_weight=self.config.orthogonality_weight,
                 regularization_type=self.config.regularization_type,
                 quantize_residual=self.config.quantize_residual,
                 quantize_base_components=self.config.quantize_base_components
             )
-        elif method == "way1":
+        elif method == "V2":
             # Compute steps_per_phase based on rotation type (Givens vs Butterfly)
             import math
             total_steps = len(self.train_loader) * self.config.epochs
@@ -943,28 +943,28 @@ class ViTRotationalTrainer:
             if self.config.use_butterfly:
                 # Butterfly sequential: log2(d_padded) phases per cycle
                 # ButterflyRotationLayer pads rank to next power of 2
-                r = self.config.pissa_rank
+                r = self.config.soara_rank
                 d_padded = 2 ** math.ceil(math.log2(r)) if r > 0 else 1
                 num_phases_per_cycle = int(math.log2(d_padded))
             else:
                 # Standard sequential Givens: r-1 phases per cycle
-                if (self.config.pissa_rank - 1) % 2 == 0:
-                    num_phases_per_cycle = self.config.pissa_rank - 1
+                if (self.config.soara_rank - 1) % 2 == 0:
+                    num_phases_per_cycle = self.config.soara_rank - 1
                 else:
-                    num_phases_per_cycle = self.config.pissa_rank
+                    num_phases_per_cycle = self.config.soara_rank
             
             # Calculate steps per phase to fit total_cycles exactly into training
             total_phases = num_phases_per_cycle * self.config.total_cycles
             steps_per_phase = max(1, total_steps // total_phases)
         
-            print(f"Way1 config: total_steps={total_steps}, cycles={self.config.total_cycles}, "
+            print(f"V2 config: total_steps={total_steps}, cycles={self.config.total_cycles}, "
                   f"phases_per_cycle={num_phases_per_cycle}, steps_per_phase={steps_per_phase}")
             
-            pissa_config = RotationalPiSSAConfig(
-                r=self.config.pissa_rank,
-                lora_alpha=self.config.pissa_alpha,
+            soara_config = SOARAConfig(
+                r=self.config.soara_rank,
+                lora_alpha=self.config.soara_alpha,
                 lora_dropout=self.config.lora_dropout,
-                method="way1",
+                method="V2",
                 steps_per_phase=steps_per_phase,
                 total_cycles=self.config.total_cycles,
                 quantize_residual=self.config.quantize_residual,
@@ -973,22 +973,22 @@ class ViTRotationalTrainer:
                 butterfly_sequential=self.config.butterfly_sequential,
                 butterfly_block_size=self.config.butterfly_block_size
             )
-        elif method == "way2":
-            pissa_config = RotationalPiSSAConfig(
-                r=self.config.pissa_rank,
-                lora_alpha=self.config.pissa_alpha,
+        elif method == "v3":
+            soara_config = SOARAConfig(
+                r=self.config.soara_rank,
+                lora_alpha=self.config.soara_alpha,
                 lora_dropout=self.config.lora_dropout,
-                method="way2",
+                method="v3",
                 low_rank_r=self.config.low_rank_r,
                 quantize_residual=self.config.quantize_residual,
                 quantize_base_components=self.config.quantize_base_components
             )
-        elif method == "way3":
-            pissa_config = RotationalPiSSAConfig(
-                r=self.config.pissa_rank,
-                lora_alpha=self.config.pissa_alpha,
+        elif method == "V4":
+            soara_config = SOARAConfig(
+                r=self.config.soara_rank,
+                lora_alpha=self.config.soara_alpha,
                 lora_dropout=self.config.lora_dropout,
-                method="way3",
+                method="V4",
                 low_rank_r=self.config.low_rank_r,
                 quantize_residual=self.config.quantize_residual,
                 quantize_base_components=self.config.quantize_base_components
@@ -997,12 +997,12 @@ class ViTRotationalTrainer:
             raise ValueError(f"Unknown method: {method}")
         
         # Replace linear layers with rotational adapters
-        # CRITICAL: Exclude classifier head - it's randomly initialized and needs full training, not PiSSA adaptation
+        # CRITICAL: Exclude classifier head - it's randomly initialized and needs full training, not SOARA adaptation
         exclude_modules = ["classifier", "head"]  # HuggingFace ViT uses 'classifier', timm uses 'head'
         
-        adapters = replace_linear_with_rotational_pissa(
+        adapters = replace_linear_with_soara(
             model=model,
-            pissa_config=pissa_config,
+            soara_config=soara_config,
             target_modules=self.config.target_modules,
             exclude_modules=exclude_modules,
             adapter_name="default",
@@ -1010,14 +1010,14 @@ class ViTRotationalTrainer:
         )
         
         print(f"Created {len(adapters)} rotational adapters using {method}")
-        print(f"Excluded from PiSSA: {exclude_modules}")
+        print(f"Excluded from SOARA: {exclude_modules}")
         
         # Create rotational trainer helper
-        rotational_trainer = RotationalPiSSATrainer(model, pissa_config)
+        rotational_trainer = SOARATrainer(model, soara_config)
         
         # CRITICAL: Always unfreeze classifier head - it's randomly initialized!
         # This is analogous to unfreezing the classification head in transfer learning
-        print("\n  Making classifier head fully trainable (no PiSSA):")
+        print("\n  Making classifier head fully trainable (no SOARA):")
         classifier_params = 0
         for name, param in model.named_parameters():
             if "classifier" in name or ("head" in name and "encoder" not in name):
@@ -1185,7 +1185,7 @@ class ViTRotationalTrainer:
                 
                 # Use provided project name if available, else construct it
                 project = self.config.project_name
-                if project == "rotational-pissa-vit": # default value
+                if project == "soara-vit": # default value
                      project = str(self.config.project_name)+str(self.config.dataset)
                 
                 init_kwargs = {
@@ -1193,8 +1193,8 @@ class ViTRotationalTrainer:
                     "name": run_name,
                     "config": {
                         "method": method,
-                        "rank": self.config.pissa_rank,
-                        "alpha": self.config.pissa_alpha,
+                        "rank": self.config.soara_rank,
+                        "alpha": self.config.soara_alpha,
                         "orthogonality_reg_weight": self.config.orthogonality_weight,
                         "regularization_type": self.config.regularization_type,
                         "learning_rate": self.config.learning_rate,
@@ -1215,10 +1215,10 @@ class ViTRotationalTrainer:
                 wandb.init(**init_kwargs)
             else:
                 # This is a sweep run, config already updated before trainer creation
-                print(f"Running sweep with config: alpha={self.config.pissa_alpha}, "
+                print(f"Running sweep with config: alpha={self.config.soara_alpha}, "
                       f"ortho_weight={self.config.orthogonality_weight}, "
                       f"reg_type={self.config.regularization_type}, "
-                      f"lr={self.config.learning_rate}, rank={self.config.pissa_rank}")
+                      f"lr={self.config.learning_rate}, rank={self.config.soara_rank}")
         
         # Training loop
         best_acc = 0.0
@@ -1377,8 +1377,8 @@ class ViTRotationalTrainer:
             correct += pred.eq(target).sum().item()
             total_samples += target.size(0)
             
-            # Add orthogonality regularization for Way 0
-            if rotational_trainer.config.method == "way0":
+            # Add orthogonality regularization for V1 (SOARA-V1)
+            if rotational_trainer.config.method == "v1":
                 ortho_loss = rotational_trainer.get_orthogonality_loss()
                 loss = loss + ortho_loss
                 
@@ -1402,7 +1402,7 @@ class ViTRotationalTrainer:
                 
                 # Check a sample rotational adapter
                 for name, module in model.named_modules():
-                    if 'RotationalLinearLayer' in type(module).__name__:
+                    if 'SOARALinearLayer' in type(module).__name__:
                         for pname, param in module.named_parameters():
                             if param.requires_grad and param.grad is not None:
                                 print(f"    {name}.{pname}: grad_norm={param.grad.norm().item():.6f}")
@@ -1413,8 +1413,8 @@ class ViTRotationalTrainer:
             
             optimizer.step()
             
-            # Rotational PiSSA phase transition (Way 1 only)
-            if rotational_trainer.config.method == "way1" and rotational_trainer.should_step_phase(global_step):
+            # SOARA phase transition (V2 (SOARA-V2) only)
+            if rotational_trainer.config.method == "V2" and rotational_trainer.should_step_phase(global_step):
                 print(f"  Step {global_step}: Advancing rotation phase")
                 params_before, params_after = rotational_trainer.step_phase()
                 
@@ -1427,11 +1427,11 @@ class ViTRotationalTrainer:
                         log_dict["rotation_layer_index"] = adapter.current_layer_index
                         log_dict["rotation_cycle"] = adapter.current_cycle
                     
-                    # Add parameter count tracking for Way1
+                    # Add parameter count tracking for V2
                     if params_before > 0:
-                        log_dict["way1/trainable_params_before"] = params_before
-                        log_dict["way1/trainable_params_after"] = params_after
-                        log_dict["way1/params_delta"] = params_after - params_before
+                        log_dict["V2/trainable_params_before"] = params_before
+                        log_dict["V2/trainable_params_after"] = params_after
+                        log_dict["V2/params_delta"] = params_after - params_before
                         print(f"    Parameters: {params_before} → {params_after} (Δ = {params_after - params_before})")
                     
                     if log_dict:
@@ -1573,7 +1573,7 @@ class ViTRotationalTrainer:
     # no need to read below... just read all 4 methods..
     def train_all_methods(self) -> Dict:
         """Train with all 4 rotational methods."""
-        methods = ["way0", "way1", "way2", "way3"]
+        methods = ["v1", "V2", "v3", "V4"]
         all_results = {}
         
         print(f"\n🚀 Training all methods: {methods}")
@@ -1649,7 +1649,7 @@ class ViTRotationalTrainer:
             plt.style.use('default')
         
         fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-        fig.suptitle('Rotational PiSSA Methods Comparison on ViT-B/16', fontsize=16)
+        fig.suptitle('SOARA Methods Comparison on ViT-B/16', fontsize=16)
         
         methods = list(results.keys())
         colors = plt.cm.Set1(np.linspace(0, 1, len(methods)))
@@ -1702,13 +1702,13 @@ class ViTRotationalTrainer:
         
         table_data = []
         for method in methods:
-            if method == "way0":
+            if method == "v1":
                 chars = ["Direct", "Regularized", "2r²"]
-            elif method == "way1":
+            elif method == "V2":
                 chars = ["Sequential", "Exact Ortho", "~r²/2"]
-            elif method == "way2":
+            elif method == "v3":
                 chars = ["Low-rank", "Approx Ortho", "4kr"]
-            elif method == "way3":
+            elif method == "V4":
                 chars = ["Exponential", "Exact Ortho", "4kr"]
             else:
                 chars = ["Unknown", "Unknown", "Unknown"]
@@ -1735,23 +1735,23 @@ class ViTRotationalTrainer:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train ViT with Rotational PiSSA")
+    parser = argparse.ArgumentParser(description="Train ViT with SOARA")
     
     # Model and dataset selection
     parser.add_argument("--model", type=str, default="google/vit-base-patch16-224",
                     #    choices=["google/vit-base-patch16-224", "google/vit-large-patch16-224", 
                     #            "google/vit-base-patch32-224", "google/vit-large-patch32-224"],
                        help="ViT model architecture to use (HuggingFace model name)")
-    parser.add_argument("--dataset", type=str, default="cifar100",
+    parser.add_argument("--dataset", type=str, default="flowers102",
                        help="Dataset to train on")
     
     # Method selection
-    parser.add_argument("--method", type=str, default="way0",
-                       choices=["way0", "way1", "way2", "way3", "all"],
+    parser.add_argument("--method", type=str, default="v1",
+                       choices=["v1", "V2", "v3", "V4", "all"],
                        help="Rotational method to use")
     
     # Training parameters
-    parser.add_argument("--epochs", type=int, default=10,
+    parser.add_argument("--epochs", type=int, default=1,
                        help="Number of training epochs")
     parser.add_argument("--batch-size", type=int, default=32,
                        help="Batch size")
@@ -1760,32 +1760,32 @@ def main():
     parser.add_argument("--weight-decay", type=float, default=0.0,
                        help="Weight decay")
     # 0.00028558  0.001
-    # Rotational PiSSA parameters
+    # SOARA parameters
     parser.add_argument("--rank", type=int, default=16,
-                       help="PiSSA rank")
+                       help="SOARA rank")
     parser.add_argument("--alpha", type=float, default=16,
-                       help="PiSSA alpha")
+                       help="SOARA alpha")
     parser.add_argument("--lora-dropout", type=float, default=0.0,
-                       help="Dropout rate for LoRA/PiSSA layers (should be 0 for PiSSA)")
+                       help="Dropout rate for LoRA/SOARA layers (should be 0 for SOARA)")
     parser.add_argument("--orthogonality-weight", type=float, default=0.040204,
-                       help="Orthogonality regularization weight (way0)")
+                       help="Orthogonality regularization weight (v1)")
     parser.add_argument("--regularization-type", type=str, default="frobenius",
                        choices=["frobenius", "determinant", "log_determinant"],
-                       help="Regularization type for way0: frobenius (||R^T@R-I||), determinant ((det(R)-1)^2), or log_determinant (log(det(R))^2)")
+                       help="Regularization type for v1: frobenius (||R^T@R-I||), determinant ((det(R)-1)^2), or log_determinant (log(det(R))^2)")
     parser.add_argument("--steps-per-phase", type=int, default=50,
-                       help="Steps per phase (way1)")
+                       help="Steps per phase (V2)")
     parser.add_argument("--total-cycles", type=int, default=2,
-                       help="Total cycles (way1)")
+                       help="Total cycles (V2)")
     parser.add_argument("--low-rank-r", type=int, default=4,
-                       help="Low rank r (way2/way3)")
+                       help="Low rank r (v3/V4)")
     parser.add_argument("--quantize-residual", action="store_true",
                        help="NF4 quantize W_residual (requires bitsandbytes)")
     parser.add_argument("--quantize-base-components", action="store_true",
                        help="NF4 quantize U and V^T (requires bitsandbytes)")
     
-    # Butterfly parameters (Way 1)
+    # Butterfly parameters (V2 (SOARA-V2))
     parser.add_argument("--use-butterfly", action="store_true",
-                       help="Use butterfly factorization for Way 1")
+                       help="Use butterfly factorization for V2 (SOARA-V2)")
     parser.add_argument("--butterfly-sequential", action="store_true",
                        help="Train butterfly components sequentially (requires --use-butterfly)")
     parser.add_argument("--butterfly-block-size", type=int, default=2,
@@ -1796,7 +1796,7 @@ def main():
     # Other options
     parser.add_argument("--output-dir", type=str, default="./outputs",
                        help="Output directory")
-    parser.add_argument("--project-name", type=str, default="rotational-pissa-vit",
+    parser.add_argument("--project-name", type=str, default="soara-vit",
                        help="W&B project name")
     parser.add_argument("--wandb-id", type=str, default=None,
                        help="W&B Run ID to resume")
@@ -1838,10 +1838,10 @@ def main():
         # Dataset
         dataset=args.dataset,
         
-        # Rotational PiSSA
+        # SOARA
         method=args.method,
-        pissa_rank=args.rank,
-        pissa_alpha=args.alpha,
+        soara_rank=args.rank,
+        soara_alpha=args.alpha,
         lora_dropout=args.lora_dropout,
         orthogonality_weight=args.orthogonality_weight,
         regularization_type=args.regularization_type,
@@ -1905,10 +1905,10 @@ def main():
             print("after update train_config:", train_config)
             # train_config.epochs = 6
             
-            if (train_config.method=="way3") or (train_config.method=="way2"):
+            if (train_config.method=="V4") or (train_config.method=="v3"):
                 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
                 print("🎯 Configured to use GPU:",os.environ["CUDA_VISIBLE_DEVICES"]  )
-            elif  (train_config.method=="way0") or (train_config.method=="way1"):
+            elif  (train_config.method=="v1") or (train_config.method=="V2"):
                 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
                 print("🎯 Configured to use GPU:",os.environ["CUDA_VISIBLE_DEVICES"]  )
                 
@@ -1916,7 +1916,7 @@ def main():
             trainer = ViTRotationalTrainer(train_config)
             
             # Train with the method specified (or from sweep)
-            method = train_config.method if train_config.method != "all" else "way0"
+            method = train_config.method if train_config.method != "all" else "v1"
             result = trainer.train_single_method(method)
             
             # wandb.finish() is already called inside train_single_method

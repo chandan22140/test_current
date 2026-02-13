@@ -11,9 +11,9 @@ from transformers.trainer import (
     PreTrainedTokenizerBase,
     TrainerCallback,
 )
-# CHANGED: Import rotational PiSSA layer instead of PEFT LoraLinear
+# CHANGED: Import SOARA layer instead of PEFT LoraLinear
 # from peft.tuners.lora.layer import Linear as LoraLinear
-from rotational_pissa_unified import RotationalLinearLayer
+from rotational_pissa_unified import SOARALinearLayer
 
 # include_keywords = ["block.0", "block.4"]
 include_keywords = ["encoder.block.2", "encoder.block.3", "encoder.block.4"]  # for T5
@@ -55,8 +55,8 @@ class LogTrainer(Trainer):
         preprocess_logits_for_metrics: Optional[
             Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
         ] = None,
-        # CHANGED: Add pissa_config for orthogonality regularization
-        pissa_config = None,
+        # CHANGED: Add soara_config for orthogonality regularization
+        soara_config = None,
         # CHANGED: Add s_lr_multiplier for separate S learning rate
         s_lr_multiplier: float = 10.0,
     ):
@@ -73,19 +73,19 @@ class LogTrainer(Trainer):
             optimizers=optimizers,
             preprocess_logits_for_metrics=preprocess_logits_for_metrics,
         )
-        # CHANGED: Detect rotational PiSSA model instead of PEFT model
-        self.is_peft = any(isinstance(m, RotationalLinearLayer) for m in model.modules())
+        # CHANGED: Detect SOARA model instead of PEFT model
+        self.is_peft = any(isinstance(m, SOARALinearLayer) for m in model.modules())
         
-        # CHANGED: Store pissa_config for orthogonality regularization
-        self.pissa_config = pissa_config
+        # CHANGED: Store soara_config for orthogonality regularization
+        self.soara_config = soara_config
         
         # CHANGED: Store s_lr_multiplier for separate S learning rate
         self.s_lr_multiplier = s_lr_multiplier
         
         if self.is_peft:
-            # CHANGED: Get scaling from rotational PiSSA layer
+            # CHANGED: Get scaling from SOARA layer
             for name, module in model.named_modules():
-                if isinstance(module, RotationalLinearLayer):
+                if isinstance(module, SOARALinearLayer):
                     self.scaling = module.scaling
                     break
         self.orig_A = None
@@ -147,9 +147,9 @@ class LogTrainer(Trainer):
         self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]], num_items_in_batch=None
     ) -> torch.Tensor:
         if not do_log:
-            # CHANGED: Add orthogonality regularization for rotational PiSSA
-            if self.is_peft and self.pissa_config is not None:
-                return self._training_step_with_pissa_reg(model, inputs, num_items_in_batch)
+            # CHANGED: Add orthogonality regularization for SOARA
+            if self.is_peft and self.soara_config is not None:
+                return self._training_step_with_soara_reg(model, inputs, num_items_in_batch)
             
             try:
                 return super().training_step(model, inputs, num_items_in_batch)
@@ -168,9 +168,9 @@ class LogTrainer(Trainer):
                     if param.requires_grad and any(
                         [kw in name for kw in include_keywords]
                     ):
-                        # CHANGED: Adapt to rotational PiSSA parameter names
-                        # For way0: R_U, R_V
-                        # For way2/3: B_U, C_U, B_V, C_V
+                        # CHANGED: Adapt to SOARA parameter names
+                        # For v1: R_U, R_V
+                        # For v3/3: B_U, C_U, B_V, C_V
                         if "R_U" in name or "B_U" in name:
                             self.orig_A[name.split("R_U.")[0] if "R_U" in name else name.split("B_U.")[0]] = (
                                 param.detach().clone()
@@ -181,7 +181,7 @@ class LogTrainer(Trainer):
                             )
                 for name, module in model.named_modules():
                     if any([kw in name for kw in include_keywords]) and isinstance(
-                        module, RotationalLinearLayer
+                        module, SOARALinearLayer
                     ):
                         breakpoint()
                         hook = get_forward_hook(name)
@@ -215,7 +215,7 @@ class LogTrainer(Trainer):
                 == self.args.gradient_accumulation_steps - 1
             ):
                 if self.is_peft:
-                    # CHANGED: Log rotational PiSSA parameters instead of LoRA A/B
+                    # CHANGED: Log SOARA parameters instead of LoRA A/B
                     # This is complex and method-dependent, keeping simplified version
                     param_dict = {}
                     for name, param in model.named_parameters():
@@ -269,11 +269,11 @@ class LogTrainer(Trainer):
 
         return loss.detach() / self.args.gradient_accumulation_steps
 
-    # CHANGED: New method for training step with PiSSA regularization
-    def _training_step_with_pissa_reg(
+    # CHANGED: New method for training step with SOARA regularization
+    def _training_step_with_soara_reg(
         self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]], num_items_in_batch=None
     ) -> torch.Tensor:
-        """Training step with orthogonality regularization for rotational PiSSA."""
+        """Training step with orthogonality regularization for SOARA."""
         if torch.cuda.is_available():
              torch.cuda.reset_peak_memory_stats()
 
@@ -297,11 +297,11 @@ class LogTrainer(Trainer):
             # DEBUG: Print raw loss values
             # print(f"[DEBUG] raw_loss={loss.item():.6f}, loss_dtype={loss.dtype}")
             
-            # Add orthogonality regularization for way0
-            if self.pissa_config.method == "way0":
+            # Add orthogonality regularization for v1
+            if self.soara_config.method == "v1":
                 ortho_loss = torch.tensor(0.0, device=loss.device, dtype=loss.dtype)
                 for module in model.modules():
-                    if isinstance(module, RotationalLinearLayer):
+                    if isinstance(module, SOARALinearLayer):
                         ortho_loss = ortho_loss + module.get_orthogonality_loss()
                 
                 # Combine losses

@@ -1,15 +1,15 @@
 """
-GLUE Benchmark Training with DeBERTaV3-base + Rotational PiSSA
+GLUE Benchmark Training with DeBERTaV3-base + SOARA
 ================================================================
 
-Trains DeBERTaV3-base on all GLUE tasks using Rotational PiSSA (all 4 ways).
+Trains DeBERTaV3-base on all GLUE tasks using SOARA (all 4 ways).
 Reports results on development set with 5-seed averaging.
 
 Tasks: MNLI, SST-2, CoLA, QQP, QNLI, RTE, MRPC, STS-B
-Methods: way0, way1, way2, way3
+Methods: v1, V2, v3, V4
 
 Usage:
-    python train_glue_deberta.py --task sst2 --method way0 --seed 42
+    python train_glue_deberta.py --task sst2 --method v1 --seed 42
     python train_glue_deberta.py --task all --method all --seeds 42,1234,2024,7890,5555
 """
 
@@ -39,12 +39,12 @@ from tqdm import tqdm
 from scipy.stats import spearmanr, pearsonr
 from sklearn.metrics import matthews_corrcoef, f1_score, accuracy_score
 
-# Import Rotational PiSSA modules
+# Import SOARA modules
 from rotational_pissa_unified import (
-    RotationalPiSSAConfig,
-    RotationalLinearLayer,
-    replace_linear_with_rotational_pissa,
-    RotationalPiSSATrainer,
+    SOARAConfig,
+    SOARALinearLayer,
+    replace_linear_with_soara,
+    SOARATrainer,
 )
 
 # ============================================================================
@@ -120,15 +120,15 @@ class GLUEConfig:
     # Task
     task: str = "sst2"
     
-    # Rotational PiSSA
-    method: str = "way0"
-    pissa_rank: int = 8
-    pissa_alpha: float = 16.0
+    # SOARA
+    method: str = "v1"
+    soara_rank: int = 8
+    soara_alpha: float = 16.0
     orthogonality_weight: float = 1e-4
     low_rank_r: int = 4
-    total_cycles: int = 3  # For way1: how many full cycles through all layers
-    use_butterfly: bool = False  # For way1: use butterfly factorization instead of sequential Givens
-    butterfly_sequential: bool = False  # For way1 (butterfly): train components sequentially
+    total_cycles: int = 3  # For V2: how many full cycles through all layers
+    use_butterfly: bool = False  # For V2: use butterfly factorization instead of sequential Givens
+    butterfly_sequential: bool = False  # For V2 (butterfly): train components sequentially
     
     # Training
     learning_rate: float = 2e-5
@@ -143,7 +143,7 @@ class GLUEConfig:
     
     # Logging
     use_wandb: bool = True
-    project_name: str = "glue-deberta-rotational-pissa"
+    project_name: str = "glue-deberta-soara"
     output_dir: str = "./glue_results"
     logging_steps: int = 100
     logging_steps: int = 100
@@ -239,7 +239,7 @@ def compute_metrics(task: str, predictions: np.ndarray, labels: np.ndarray) -> D
 # ============================================================================
 
 class GLUETrainer:
-    """Trainer for GLUE tasks with Rotational PiSSA."""
+    """Trainer for GLUE tasks with SOARA."""
     
     def __init__(self, config: GLUEConfig):
         self.config = config
@@ -267,8 +267,8 @@ class GLUETrainer:
         # Load data
         self._load_data()
         
-        # Apply Rotational PiSSA
-        self._apply_rotational_pissa()
+        # Apply SOARA
+        self._apply_soara()
         
         # Setup optimizer and scheduler
         self._setup_optimizer()
@@ -368,9 +368,9 @@ class GLUETrainer:
         print(f"  Train samples: {len(dataset['train'])}")
         print(f"  Val samples: {len(dataset[val_key])}")
     
-    def _apply_rotational_pissa(self):
-        """Apply Rotational PiSSA to the model."""
-        print(f"\nApplying Rotational PiSSA (method={self.config.method}, rank={self.config.pissa_rank})")
+    def _apply_soara(self):
+        """Apply SOARA to the model."""
+        print(f"\nApplying SOARA (method={self.config.method}, rank={self.config.soara_rank})")
         
         # Calculate adaptive steps_per_phase
         import math
@@ -381,7 +381,7 @@ class GLUETrainer:
             # Butterfly sequential: log2(d_padded)
             # We need to approximate d_padded if we don't know it yet
             # But roughly it's just log2(r) or next power of 2
-            r = self.config.pissa_rank
+            r = self.config.soara_rank
             if hasattr(self.model.config, "hidden_size") and r == self.model.config.hidden_size:
                  # If using full rank, it likely matches d_model which is often power of 2 or close
                  pass
@@ -392,7 +392,7 @@ class GLUETrainer:
             phases_per_cycle = int(math.log2(d_padded))
         else:
             # Standard sequential Givens: r-1 phases
-            phases_per_cycle = max(1, self.config.pissa_rank - 1)
+            phases_per_cycle = max(1, self.config.soara_rank - 1)
         
         # Calculate steps per phase to fit total_cycles exactly into total_steps
         # total_steps = steps_per_phase * phases_per_cycle * total_cycles
@@ -406,10 +406,10 @@ class GLUETrainer:
         print(f"    Total phases: {total_phases}")
         print(f"    => Steps per phase: {steps_per_phase} (was default 100)")
 
-        # Configure PiSSA
-        pissa_config = RotationalPiSSAConfig(
-            r=self.config.pissa_rank,
-            lora_alpha=self.config.pissa_alpha,
+        # Configure SOARA
+        soara_config = SOARAConfig(
+            r=self.config.soara_rank,
+            lora_alpha=self.config.soara_alpha,
             method=self.config.method,
             orthogonality_reg_weight=self.config.orthogonality_weight,
             low_rank_r=self.config.low_rank_r,
@@ -438,24 +438,24 @@ class GLUETrainer:
             "intermediate.dense",                     # FFN up
             "output.dense",                           # FFN down (careful: not pooler)
         ]
-        exclude_modules = ["pooler", "classifier"]  # Don't apply PiSSA to these
+        exclude_modules = ["pooler", "classifier"]  # Don't apply SOARA to these
         
         # Replace linear layers (excludes pooler and classifier)
-        self.adapters = replace_linear_with_rotational_pissa(
+        self.adapters = replace_linear_with_soara(
             self.model,
-            pissa_config,
+            soara_config,
             target_modules=target_modules,
             exclude_modules=exclude_modules,
             freeze_base_model=True,
         )
         
         # Create trainer for orthogonality loss
-        self.rotational_trainer = RotationalPiSSATrainer(self.model, pissa_config)
-        self.pissa_config = pissa_config
+        self.rotational_trainer = SOARATrainer(self.model, soara_config)
+        self.soara_config = soara_config
         
         # CRITICAL: Unfreeze classifier (and pooler if present) - they're randomly initialized!
-        # They need FULL training, not PiSSA adaptation
-        print("  Making classifier (and pooler if present) fully trainable (no PiSSA):")
+        # They need FULL training, not SOARA adaptation
+        print("  Making classifier (and pooler if present) fully trainable (no SOARA):")
         for name, param in self.model.named_parameters():
             if "classifier" in name or ("pooler" in name and not self.config.no_pooler):
                 param.requires_grad = True
@@ -501,7 +501,7 @@ class GLUETrainer:
                     "task": self.config.task,
                     "method": self.config.method,
                     "seed": self.config.seed,
-                    "rank": self.config.pissa_rank,
+                    "rank": self.config.soara_rank,
                     "learning_rate": self.config.learning_rate,
                     "epochs": self.config.epochs,
                     "batch_size": self.config.batch_size,
@@ -573,8 +573,8 @@ class GLUETrainer:
             outputs = self.model(**batch)
             loss = outputs.loss
             
-            # Add orthogonality regularization for way0
-            if self.pissa_config.method == "way0":
+            # Add orthogonality regularization for v1
+            if self.soara_config.method == "v1":
                 ortho_loss = self.rotational_trainer.get_orthogonality_loss()
                 loss = loss + ortho_loss
             
@@ -613,8 +613,8 @@ class GLUETrainer:
             self.optimizer.step()
             self.scheduler.step()
             
-            # Update Rotational PiSSA phase (for Way 1) using GLOBAL step
-            if self.pissa_config.method == "way1" and self.rotational_trainer.should_step_phase(global_step):
+            # Update SOARA phase (for V2 (SOARA-V2)) using GLOBAL step
+            if self.soara_config.method == "V2" and self.rotational_trainer.should_step_phase(global_step):
                 self.rotational_trainer.step_phase()
             
             # Accumulate loss on GPU to avoid sync
@@ -687,34 +687,34 @@ def run_single_experiment(config: GLUEConfig) -> Dict[str, float]:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="GLUE Benchmark with DeBERTaV3 + Rotational PiSSA")
+    parser = argparse.ArgumentParser(description="GLUE Benchmark with DeBERTaV3 + SOARA")
     
     # Task and method
     parser.add_argument("--task", type=str, default="cola",
                         choices=list(GLUE_TASKS.keys()),
                         help="GLUE task to run")
-    parser.add_argument("--method", type=str, default="way0",
-                        choices=["way0", "way1", "way2", "way3"],
-                        help="Rotational PiSSA method")
+    parser.add_argument("--method", type=str, default="v1",
+                        choices=["v1", "V2", "v3", "V4"],
+                        help="SOARA method")
     
     # Model and training
     parser.add_argument("--model", type=str, default="microsoft/deberta-v3-base")
     parser.add_argument("--rank", type=int, default=None)
     parser.add_argument("--lr", type=float, default=2e-5)
-    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--logging_steps", type=int, default=100,
                         help="Log every X steps")
     parser.add_argument("--weight_decay", type=float, default=0.0)
     parser.add_argument("--orthogonality_weight", type=float, default=1e-4)
     parser.add_argument("--total_cycles", type=int, default=3,
-                        help="For way1: how many full cycles through all layers")
+                        help="For V2: how many full cycles through all layers")
     parser.add_argument("--max-seq-length", type=int, default=256)
     parser.add_argument("--max_steps", type=int, default=-1, help="Limit number of steps per epoch for debugging")
     parser.add_argument("--no-pooler", action="store_true",
                         help="Remove pooler, use [CLS] token directly for classification")
     parser.add_argument("--use-butterfly", action="store_true",
-                        help="For way1: use butterfly parameterization (log(r) layers) instead of sequential Givens")
+                        help="For V2: use butterfly parameterization (log(r) layers) instead of sequential Givens")
     parser.add_argument("--butterfly-sequential", action="store_true",
                         help="If True, train butterfly components one at a time (like Givens sequential mode)")
     
@@ -739,7 +739,7 @@ def main():
                 print(f"⚠️ Could not determine d_model from config, defaulting to 128: {e}")
                 args.rank = 128
         else:
-            # Default for standard PiSSA
+            # Default for standard SOARA
             args.rank = 8
 
     # Create output dir
@@ -750,7 +750,7 @@ def main():
         task=args.task,
         method=args.method,
         model_name=args.model,
-        pissa_rank=args.rank,
+        soara_rank=args.rank,
         orthogonality_weight=args.orthogonality_weight,
         total_cycles=args.total_cycles,
         learning_rate=args.lr,

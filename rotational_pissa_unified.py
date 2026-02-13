@@ -1,11 +1,11 @@
 """
-Unified Rotational PiSSA Implementation
+Unified SOARA Implementation
 ======================================
 
-This module provides a complete implementation of Rotational PiSSA, merging PiSSA 
-with the Method of Rotation of SVD Subspaces.
+This module provides a complete implementation of SOARA (Subspace Orthogonal
+Adaptation via Rotational Alignment).
 
-Mathematical Framework (Following PiSSA Paper):
+Mathematical Framework:
 1. Original weight W is decomposed: W = U @ S @ V^T
 2. Split into principal and residual components based on rank r
 3. W_residual = U[:,r:] @ S[r:,r:] @ V[:,r:]^T (NF4 quantized, frozen)
@@ -13,7 +13,7 @@ Mathematical Framework (Following PiSSA Paper):
 5. Final computation: Y = X @ (W_residual + W_principal)
 
 Trainable Components:
-- R_U, R_V: Rotation matrices (4 different parameterization ways)
+- R_U, R_V: Rotation matrices (4 different parameterization methods)
 - S[:r,:r]: Principal singular values (optionally trainable)
 
 Frozen Components:
@@ -21,10 +21,10 @@ Frozen Components:
 - U[:,:r], V[:,:r]: Principal singular vectors (optionally NF4 quantized)
 
 Rotation Parameterization Methods:
-- Way 0: Direct optimization with orthogonality regularization
-- Way 1: Greedy sequential Givens rotations  
-- Way 2: Low-rank skew-symmetric perturbation I + BC^T - CB^T
-- Way 3: Exponential map of skew-symmetric matrix exp(BC^T - CB^T)
+- V1 (SOARA-V1): Direct optimization with orthogonality regularization
+- V2 (SOARA-V2): Exact orthogonality via Givens rotations or Butterfly factorizations
+- V3: Low-rank skew-symmetric perturbation I + BC^T - CB^T
+- V4: Exponential map of skew-symmetric matrix exp(BC^T - CB^T)
 """
 
 import os
@@ -209,22 +209,22 @@ except ImportError:
     Linear4bit = None
 
 @dataclass
-class RotationalPiSSAConfig:
-    """Configuration for Rotational PiSSA adapter."""
+class SOARAConfig:
+    """Configuration for SOARA adapter."""
     
     # Core parameters
     r: int = 16                                   # Rank
     lora_alpha: float = 16.0                     # Scaling factor
-    lora_dropout: float = 0.0                    # Should be 0 for PiSSA
+    lora_dropout: float = 0.0                    # Should be 0 for SOARA
     
     # Rotation parameterization method
-    method: Literal["way0", "way1", "way2", "way3"] = "way0"
+    method: Literal["v1", "V2", "v3", "V4"] = "v1"
     
-    # Way 0 specific parameters (Direct orthogonality regularization)
+    # V1 (SOARA-V1) specific parameters (Direct orthogonality regularization)
     orthogonality_reg_weight: float = 1e-4      # Weight for orthogonality regularization loss (frobenius only)
     regularization_type: str = "frobenius"    # frobenius (recommended - fast), determinant, log_determinant
     
-    # Way 1 specific parameters (Sequential Givens rotations OR Butterfly factorization)
+    # V2 specific parameters (Sequential Givens rotations OR Butterfly factorization)
     n_givens_layers: Optional[int] = None        # Number of Givens layers (default: r-1)
     steps_per_phase: int = 100                   # Steps to train each Givens layer
     total_cycles: int = 3                        # Total cycles through all layers
@@ -232,8 +232,8 @@ class RotationalPiSSAConfig:
     butterfly_sequential: bool = False           # If True, train butterfly components one at a time (like Givens)
     butterfly_block_size: int = 1                # Block size b for BOFT(m, b). b=2 gives O(r log r) params
     
-    # Way 2/3 specific parameters (Low-rank methods)
-    low_rank_r: int = 4                          # Low rank for B,C matrices in ways 2&3
+    # V3/V4 specific parameters (Low-rank methods)
+    low_rank_r: int = 4                          # Low rank for B,C matrices in ways V3&V4
     
     # General parameters
     init_identity: bool = True                # Initialize rotation matrices as identity
@@ -849,14 +849,14 @@ class ButterflyRotationLayer(nn.Module):
 
 
 # ============================================================================
-# MAIN ROTATIONAL PISSA LAYER
+# MAIN SOARA LAYER
 # ============================================================================
 
-class RotationalLinearLayer(nn.Module):
+class SOARALinearLayer(nn.Module):
     """
-    A Linear layer with rotational PiSSA adaptation.
+    A Linear layer with SOARA adaptation.
     
-    Implementation follows PiSSA paper methodology:
+    Implementation follows SOARA paper methodology:
     1. SVD decomposition: W = U @ S @ V^T
     2. Split into principal and residual components
     3. W_residual = U[:,r:] @ S[r:,r:] @ V[:,r:]^T (NF4 quantized and frozen)
@@ -872,13 +872,13 @@ class RotationalLinearLayer(nn.Module):
     def __init__(
         self,
         base_layer: nn.Linear,
-        pissa_config: RotationalPiSSAConfig,
+        soara_config: SOARAConfig,
         adapter_name: str = "default"
     ):
         super().__init__()
         
         self.base_layer = base_layer
-        self.pissa_config = pissa_config
+        self.soara_config = soara_config
         self.adapter_name = adapter_name
         
         # Store base layer properties
@@ -888,7 +888,7 @@ class RotationalLinearLayer(nn.Module):
         # Cap r to the layer's maximum possible rank
         # For a matrix of shape (out_features, in_features), max rank is min(out, in)
         max_rank = min(self.in_features, self.out_features)
-        self.r = min(pissa_config.r, max_rank)
+        self.r = min(soara_config.r, max_rank)
         
         # Perform SVD decomposition on base weight
         self._initialize_svd_components()
@@ -897,25 +897,25 @@ class RotationalLinearLayer(nn.Module):
         self._initialize_rotation_matrices()
         
         # Dropout layer
-        if pissa_config.lora_dropout > 0:
-            self.dropout = nn.Dropout(pissa_config.lora_dropout)
+        if soara_config.lora_dropout > 0:
+            self.dropout = nn.Dropout(soara_config.lora_dropout)
         else:
             self.dropout = nn.Identity()
             
         # Scaling factor
         self.scaling = 1
-        # self.scaling = pissa_config.lora_alpha / pissa_config.r
+        # self.scaling = soara_config.lora_alpha / soara_config.r
         
-        # Training state for Way 1 (sequential Givens) - not needed for butterfly mode
-        if pissa_config.method == "way1" and not pissa_config.use_butterfly:
+        # Training state for V2 (sequential Givens) - not needed for butterfly mode
+        if soara_config.method == "V2" and not soara_config.use_butterfly:
             self.current_layer_index = 0
             self.current_cycle = 0
             self.step_count = 0
     
     def _initialize_svd_components(self):
-        """Perform SVD on base layer weight and implement PiSSA methodology.
+        """Perform SVD on base layer weight and implement SOARA methodology.
         
-        Following PiSSA paper:
+        Following SOARA paper:
         1. Decompose W = U @ S @ V^T
         2. Split into principal {U[:,:r], S[:r,:r], V[:,:r]} and residual {U[:,r:], S[r:,r:], V[:,r:]}
         3. Create W_residual = U[:,r:] @ S[r:,r:] @ V[:,r:]^T (NF4 quantized, frozen)
@@ -976,7 +976,7 @@ class RotationalLinearLayer(nn.Module):
             torch.cuda.empty_cache()
             
             # ========== Quantize W_residual (QLoRA pattern) ==========
-            if self.pissa_config.quantize_residual and HAS_BITSANDBYTES:
+            if self.soara_config.quantize_residual and HAS_BITSANDBYTES:
                 print(f"      Quantizing W_residual to NF4 (QLoRA pattern)")
                 
                 # Get bias data if exists (before we replace base_layer)
@@ -1007,7 +1007,7 @@ class RotationalLinearLayer(nn.Module):
             # These are kept in fp16 by default (like LoRA A/B in QLoRA)
             # Optional: quantize U, V if requested (not recommended, but supported)
             
-            if self.pissa_config.quantize_base_components and HAS_BITSANDBYTES:
+            if self.soara_config.quantize_base_components and HAS_BITSANDBYTES:
                 print(f"      Quantizing U and V to NF4 (not recommended, may impact accuracy)")
                 from bitsandbytes.nn import Params4bit
                 
@@ -1057,9 +1057,9 @@ class RotationalLinearLayer(nn.Module):
             
             # S: Use FP32 if s_dtype_fp32 is enabled (fixes bfloat16 precision issues)
             # With bfloat16, small optimizer updates (lr*grad ~ 2e-6) round to 0 for values ~6.0
-            s_dtype = torch.float32 if self.pissa_config.s_dtype_fp32 else original_dtype
+            s_dtype = torch.float32 if self.soara_config.s_dtype_fp32 else original_dtype
             S_converted = to_free(S_principal, dtype=s_dtype, device=original_device)
-            if self.pissa_config.freeze_singular_values:
+            if self.soara_config.freeze_singular_values:
                 self.register_buffer("S", S_converted)
             else:
                 self.S = nn.Parameter(S_converted)
@@ -1070,24 +1070,24 @@ class RotationalLinearLayer(nn.Module):
     
     def _initialize_rotation_matrices(self):
         """Initialize rotation matrices R_U and R_V based on the selected method."""
-        if self.pissa_config.method == "way0":
-            self._init_way0()
-        elif self.pissa_config.method == "way1":
-            self._init_way1()
-        elif self.pissa_config.method == "way2":
-            self._init_way2()
-        elif self.pissa_config.method == "way3":
-            self._init_way3()
+        if self.soara_config.method == "v1":
+            self._init_v1()
+        elif self.soara_config.method == "V2":
+            self._init_V2()
+        elif self.soara_config.method == "v3":
+            self._init_v3()
+        elif self.soara_config.method == "V4":
+            self._init_V4()
         else:
-            raise ValueError(f"Unknown rotation method: {self.pissa_config.method}")
+            raise ValueError(f"Unknown rotation method: {self.soara_config.method}")
     
-    def _init_way0(self):
-        """Way 0: Direct parameterization with orthogonality regularization."""
+    def _init_v1(self):
+        """V1 (SOARA-V1): Direct parameterization with orthogonality regularization."""
         # Get device and dtype from U buffer (which is already on correct device)
         device = self.U.device
         dtype = self.U.dtype
         
-        if self.pissa_config.init_identity:
+        if self.soara_config.init_identity:
             self.R_U = nn.Parameter(torch.eye(self.r, dtype=dtype, device=device))
             self.R_V = nn.Parameter(torch.eye(self.r, dtype=dtype, device=device))
         else:
@@ -1102,8 +1102,8 @@ class RotationalLinearLayer(nn.Module):
             self.R_U = nn.Parameter(Q_U)
             self.R_V = nn.Parameter(Q_V)
     
-    def _init_way1(self):
-        """Way 1: Greedy sequential Givens rotations OR Butterfly factorization.
+    def _init_V2(self):
+        """V2 (SOARA-V2): Greedy sequential Givens rotations OR Butterfly factorization.
         
         If use_butterfly=True:
             Uses ButterflyRotationLayer with log(r) levels for O(r log r) parameters.
@@ -1119,10 +1119,10 @@ class RotationalLinearLayer(nn.Module):
         """
         device = self.U.device
         
-        if self.pissa_config.use_butterfly:
-            block_size = self.pissa_config.butterfly_block_size
+        if self.soara_config.use_butterfly:
+            block_size = self.soara_config.butterfly_block_size
             
-            if self.pissa_config.butterfly_sequential:
+            if self.soara_config.butterfly_sequential:
                 # Sequential butterfly mode: train one component at a time (like Givens)
                 # Components are B(d,d), B(d,d/2), ..., B(d,2) - m = log2(d) total
                 d_padded = 2 ** math.ceil(math.log2(self.r)) if (self.r & (self.r - 1)) != 0 else self.r
@@ -1163,7 +1163,7 @@ class RotationalLinearLayer(nn.Module):
                 print(f"    🦋 Butterfly mode: {n_levels} levels (log2({self.r})), {n_params_per_layer} params per rotation matrix")
         else:
             # Classic Givens mode: sequential layer training
-            n_layers = self.pissa_config.n_givens_layers or (self.r - 1)
+            n_layers = self.soara_config.n_givens_layers or (self.r - 1)
             
             # Generate pairings for all phases (we'll instantiate layers on-demand)
             self.givens_pairings = generate_givens_pairings(self.r, n_layers)
@@ -1180,9 +1180,9 @@ class RotationalLinearLayer(nn.Module):
             # Note: U and V buffers will be updated in-place as we merge rotations
             # No need for separate U_base/V_base since we modify U/V directly
     
-    def _init_way2(self):
-        """Way 2: Low-rank skew-symmetric perturbation I + BC^T - CB^T."""
-        lr_r = self.pissa_config.low_rank_r
+    def _init_v3(self):
+        """V3: Low-rank skew-symmetric perturbation I + BC^T - CB^T."""
+        lr_r = self.soara_config.low_rank_r
         
         # Get device and dtype from U buffer
         device = self.U.device
@@ -1192,7 +1192,7 @@ class RotationalLinearLayer(nn.Module):
         self.B_U = nn.Parameter(torch.randn(self.r, lr_r, dtype=dtype, device=device) * 0.1)
         self.B_V = nn.Parameter(torch.randn(self.r, lr_r, dtype=dtype, device=device) * 0.1)
         
-        if self.pissa_config.init_identity:
+        if self.soara_config.init_identity:
             # Initialize C to zero so that BC^T - CB^T = 0, resulting in Identity rotation
             self.C_U = nn.Parameter(torch.zeros(self.r, lr_r, dtype=dtype, device=device))
             self.C_V = nn.Parameter(torch.zeros(self.r, lr_r, dtype=dtype, device=device))
@@ -1200,9 +1200,9 @@ class RotationalLinearLayer(nn.Module):
             self.C_U = nn.Parameter(torch.randn(self.r, lr_r, dtype=dtype, device=device) * 0.1)
             self.C_V = nn.Parameter(torch.randn(self.r, lr_r, dtype=dtype, device=device) * 0.1)
     
-    def _init_way3(self):
-        """Way 3: Exponential map of skew-symmetric matrix."""
-        lr_r = self.pissa_config.low_rank_r
+    def _init_V4(self):
+        """V4: Exponential map of skew-symmetric matrix."""
+        lr_r = self.soara_config.low_rank_r
         
         # Get device and dtype from U buffer
         device = self.U.device
@@ -1212,7 +1212,7 @@ class RotationalLinearLayer(nn.Module):
         self.B_U = nn.Parameter(torch.randn(self.r, lr_r, dtype=dtype, device=device) * 0.1)
         self.B_V = nn.Parameter(torch.randn(self.r, lr_r, dtype=dtype, device=device) * 0.1)
         
-        if self.pissa_config.init_identity:
+        if self.soara_config.init_identity:
             # Initialize C to zero so that BC^T - CB^T = 0, resulting in Identity rotation (exp(0)=I)
             self.C_U = nn.Parameter(torch.zeros(self.r, lr_r, dtype=dtype, device=device))
             self.C_V = nn.Parameter(torch.zeros(self.r, lr_r, dtype=dtype, device=device))
@@ -1222,13 +1222,13 @@ class RotationalLinearLayer(nn.Module):
     
     def get_rotation_matrices(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute the current rotation matrices R_U and R_V."""
-        if self.pissa_config.method == "way0":
+        if self.soara_config.method == "v1":
             return self.R_U, self.R_V
         
-        elif self.pissa_config.method == "way1":
-            # For Way 1, check if using butterfly or classic Givens
-            if self.pissa_config.use_butterfly:
-                if self.pissa_config.butterfly_sequential:
+        elif self.soara_config.method == "V2":
+            # For V2 (SOARA-V2), check if using butterfly or classic Givens
+            if self.soara_config.use_butterfly:
+                if self.soara_config.butterfly_sequential:
                     # Sequential butterfly: return current component's matrix
                     R_U = self.current_butterfly_u()
                     R_V = self.current_butterfly_v()
@@ -1242,7 +1242,7 @@ class RotationalLinearLayer(nn.Module):
             else:
                 return self.current_givens_u(), self.current_givens_v()
         
-        elif self.pissa_config.method == "way2":
+        elif self.soara_config.method == "v3":
             # R = I + BC^T - CB^T (skew-symmetric perturbation)
             R_U = (torch.eye(self.r, device=self.B_U.device, dtype=self.B_U.dtype) + 
                    self.B_U @ self.C_U.T - self.C_U @ self.B_U.T)
@@ -1250,7 +1250,7 @@ class RotationalLinearLayer(nn.Module):
                    self.B_V @ self.C_V.T - self.C_V @ self.B_V.T)
             return R_U, R_V
         
-        elif self.pissa_config.method == "way3":
+        elif self.soara_config.method == "V4":
             # R = exp(BC^T - CB^T)
             skew_U = self.B_U @ self.C_U.T - self.C_U @ self.B_U.T
             skew_V = self.B_V @ self.C_V.T - self.C_V @ self.B_V.T
@@ -1264,7 +1264,7 @@ class RotationalLinearLayer(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through the rotational adapter.
         
-        Following PiSSA formulation:
+        Following SOARA formulation:
         Y = X * W = X * (W_residual + W_principal)
         where:
         - W_residual is stored in base_layer (NF4 quantized if quantize_residual=True)
@@ -1272,7 +1272,7 @@ class RotationalLinearLayer(nn.Module):
         
         Handles quantized U/V by dequantizing before matmul operations.
         
-        For butterfly mode (Way 1 + use_butterfly=True), uses O(d log d) apply()
+        For butterfly mode (V2 + use_butterfly=True), uses O(d log d) apply()
         instead of building full O(d²) rotation matrices.
         """
         # Base layer forward pass (contains W_residual - optionally quantized)
@@ -1326,7 +1326,7 @@ class RotationalLinearLayer(nn.Module):
         return result
 
     def get_orthogonality_loss(self) -> torch.Tensor:
-        """Compute orthogonality regularization loss for Way 0.
+        """Compute orthogonality regularization loss for V1 (SOARA-V1).
         
         Supports three regularization types:
         1. frobenius: ||R^T @ R - I||_F^2 (encourages orthogonality)
@@ -1334,15 +1334,15 @@ class RotationalLinearLayer(nn.Module):
         3. log_determinant: (log(det(R)) - 0)^2 (numerically stable det constraint)
         """
         # Early return if regularization is disabled to save compute
-        if self.pissa_config.orthogonality_reg_weight == 0:
+        if self.soara_config.orthogonality_reg_weight == 0:
             return torch.tensor(0.0, device=self.R_U.device if hasattr(self, 'R_U') else next(self.parameters()).device)
         
-        if self.pissa_config.method != "way0":
+        if self.soara_config.method != "v1":
             # For ways 1, 2, 3: orthogonality is guaranteed by construction
             device = next(self.parameters()).device
             return torch.tensor(0.0, device=device)
         
-        reg_type = self.pissa_config.regularization_type
+        reg_type = self.soara_config.regularization_type
         
         if reg_type == "frobenius":
             # ||R_U^T @ R_U - I||_F^2 + ||R_V^T @ R_V - I||_F^2
@@ -1370,10 +1370,10 @@ class RotationalLinearLayer(nn.Module):
         else:
             raise ValueError(f"Unknown regularization type: {reg_type}")
         
-        return (loss_u + loss_v) * self.pissa_config.orthogonality_reg_weight
+        return (loss_u + loss_v) * self.soara_config.orthogonality_reg_weight
     
     def step_phase(self):
-        """Advance to next phase for Way 1 (sequential Givens training).
+        """Advance to next phase for V2 (sequential Givens training).
         
         This method:
         1. Merges current Givens rotation into U and V (in-place)
@@ -1385,15 +1385,15 @@ class RotationalLinearLayer(nn.Module):
         Returns:
             tuple: (params_before, params_after) for tracking parameter count changes
         """
-        if self.pissa_config.method != "way1":
+        if self.soara_config.method != "V2":
             return (0, 0)
         
         # Butterfly mode doesn't use sequential phases - all layers trained simultaneously
-        if self.pissa_config.use_butterfly and not self.pissa_config.butterfly_sequential:
+        if self.soara_config.use_butterfly and not self.soara_config.butterfly_sequential:
             return (0, 0)
         
         # Handle sequential butterfly transitions
-        if self.pissa_config.use_butterfly and self.pissa_config.butterfly_sequential:
+        if self.soara_config.use_butterfly and self.soara_config.butterfly_sequential:
              # Count trainable parameters before merging
             params_before = sum(p.numel() for p in self.parameters() if p.requires_grad)
             
@@ -1426,18 +1426,18 @@ class RotationalLinearLayer(nn.Module):
                 # Check for cycle completion
                 if self.current_butterfly_idx == 0:
                     self.current_butterfly_cycle += 1
-                    # print(f"  ✓ Completed butterfly cycle {self.current_butterfly_cycle}/{self.pissa_config.total_cycles}")
+                    # print(f"  ✓ Completed butterfly cycle {self.current_butterfly_cycle}/{self.soara_config.total_cycles}")
                 
                 # Create next component
                 next_k = self.butterfly_k_values[self.current_butterfly_idx]
-                block_size = self.pissa_config.butterfly_block_size
+                block_size = self.soara_config.butterfly_block_size
                 device = self.U.device
                 
                 next_u = ButterflyComponent(self.butterfly_d_padded, next_k, block_size).to(device)
                 next_v = ButterflyComponent(self.butterfly_d_padded, next_k, block_size).to(device)
                 
                 # If cycles complete, just log it but don't freeze
-                if self.current_butterfly_cycle >= self.pissa_config.total_cycles:
+                if self.current_butterfly_cycle >= self.soara_config.total_cycles:
                      # Start of extra cycles - keep training!
                      pass
                 
@@ -1477,7 +1477,7 @@ class RotationalLinearLayer(nn.Module):
             # Check if we completed a full cycle
             if self.current_layer_index == 0:
                 self.current_cycle += 1
-                # print(f"  ✓ Completed cycle {self.current_cycle}/{self.pissa_config.total_cycles}")
+                # print(f"  ✓ Completed cycle {self.current_cycle}/{self.soara_config.total_cycles}")
             
             # ALWAYS instantiate next Givens layer (prevents AttributeError in forward/validation)
             # Even after all cycles complete, we need layers for forward pass
@@ -1491,7 +1491,7 @@ class RotationalLinearLayer(nn.Module):
             next_v = next_v.to(device)
             
             # If we've completed all cycles, just log it but don't freeze
-            if self.current_cycle >= self.pissa_config.total_cycles:
+            if self.current_cycle >= self.soara_config.total_cycles:
                  # Start of extra cycles - keep training!
                  pass
             
@@ -1513,8 +1513,8 @@ class RotationalLinearLayer(nn.Module):
         Trainable components:
             - R_U, R_V: Rotation matrices (all 4 ways)
             - S: Singular values (if freeze_singular_values=False)
-            - Givens angles: For Way 1
-            - B_U, C_U, B_V, C_V: For Ways 2 & 3
+            - Givens angles: For V2 (SOARA-V2)
+            - B_U, C_U, B_V, C_V: For Ways V3 & V4
             
         Frozen components:
             - base_layer.weight: W_residual (NF4 quantized)
@@ -1553,9 +1553,9 @@ class RotationalLinearLayer(nn.Module):
         unfreeze rotation parameters and optionally S.
         
         This method ensures correct freezing regardless of the rotation method:
-        - Way0: R_U, R_V trainable
-        - Way1: givens_u_layers.*.thetas, givens_v_layers.*.thetas trainable
-        - Way2/3: B_U, C_U, B_V, C_V trainable
+        - V1: R_U, R_V trainable
+        - V2: givens_u_layers.*.thetas, givens_v_layers.*.thetas trainable
+        - V3/V4: B_U, C_U, B_V, C_V trainable
         - S: trainable if freeze_singular_values=False
         
         Base layer weight/bias and U/V buffers are always frozen.
@@ -1598,28 +1598,28 @@ class RotationalLinearLayer(nn.Module):
         print(f"  • Total trainable: {total_trainable:,}")
         print(f"  • Total frozen: {total_frozen:,}")
         print(f"  • Efficiency ratio: {total_trainable/(total_trainable+total_frozen):.4f}")
-        print(f"  • Quantization: W_residual={'✅' if self.pissa_config.quantize_residual else '❌'}, U/V={'✅' if self.pissa_config.quantize_base_components else '❌'}")
+        print(f"  • Quantization: W_residual={'✅' if self.soara_config.quantize_residual else '❌'}, U/V={'✅' if self.soara_config.quantize_base_components else '❌'}")
 
 # ============================================================================
 # TRAINING UTILITIES
 # ============================================================================
 
-class RotationalPiSSATrainer:
-    """Helper class for training rotational PiSSA models with Way 1 (sequential Givens)."""
+class SOARATrainer:
+    """Helper class for training SOARA models with V2 (sequential Givens)."""
     
-    def __init__(self, model: nn.Module, config: RotationalPiSSAConfig):
+    def __init__(self, model: nn.Module, config: SOARAConfig):
         self.model = model
         self.config = config
         
         # Find all rotational adapters
         self.adapters = []
         for module in model.modules():
-            if isinstance(module, RotationalLinearLayer):
+            if isinstance(module, SOARALinearLayer):
                 self.adapters.append(module)
     
     def should_step_phase(self, global_step: int) -> bool:
         """Check if we should advance to the next phase."""
-        if self.config.method != "way1":
+        if self.config.method != "V2":
             return False
         
         return global_step % self.config.steps_per_phase == 0 and global_step > 0
@@ -1650,8 +1650,8 @@ class RotationalPiSSATrainer:
         return total_loss
     
     # def is_training_complete(self) -> bool:
-    #     """Check if training is complete for Way 1."""
-    #     if self.config.method != "way1" or not self.adapters:
+    #     """Check if training is complete for V2 (SOARA-V2)."""
+    #     if self.config.method != "V2" or not self.adapters:
     #         return False
         
     #     return self.adapters[0].current_cycle >= self.config.total_cycles
@@ -1662,29 +1662,29 @@ class RotationalPiSSATrainer:
 
 def _create_adapter_from_svd(
     base_layer: nn.Linear,
-    pissa_config: 'RotationalPiSSAConfig',
+    soara_config: 'SOARAConfig',
     adapter_name: str,
     U: torch.Tensor,  # Full U from SVD [out_features, k]
     S: torch.Tensor,  # Full S from SVD [k]
     V: torch.Tensor,  # Full V from SVD [k, in_features]
     original_dtype: torch.dtype,
     original_device: torch.device
-) -> 'RotationalLinearLayer':
+) -> 'SOARALinearLayer':
     """
-    Create a RotationalLinearLayer from pre-computed SVD results.
+    Create a SOARALinearLayer from pre-computed SVD results.
     
     This is used by batched SVD processing to avoid redundant per-layer SVD computation.
     The SVD is computed once in a batch for all layers with the same shape, then this
     function creates adapters from those pre-computed results.
     """
-    r = pissa_config.r
+    r = soara_config.r
     
     # Create adapter instance WITHOUT calling _initialize_svd_components
-    adapter = object.__new__(RotationalLinearLayer)
+    adapter = object.__new__(SOARALinearLayer)
     nn.Module.__init__(adapter)
     
     adapter.base_layer = base_layer
-    adapter.pissa_config = pissa_config
+    adapter.soara_config = soara_config
     adapter.adapter_name = adapter_name
     adapter.r = r
     adapter.in_features = base_layer.in_features
@@ -1715,9 +1715,9 @@ def _create_adapter_from_svd(
     adapter.register_buffer("V", V_principal.to(dtype=original_dtype, device=original_device))
     
     # S: stored as FP32 if s_dtype_fp32 is enabled
-    s_dtype = torch.float32 if pissa_config.s_dtype_fp32 else original_dtype
+    s_dtype = torch.float32 if soara_config.s_dtype_fp32 else original_dtype
     S_converted = S_principal.to(dtype=s_dtype, device=original_device)
-    if pissa_config.freeze_singular_values:
+    if soara_config.freeze_singular_values:
         adapter.register_buffer("S", S_converted)
     else:
         adapter.S = nn.Parameter(S_converted)
@@ -1726,15 +1726,15 @@ def _create_adapter_from_svd(
     adapter._initialize_rotation_matrices()
     
     # Dropout
-    if pissa_config.lora_dropout > 0:
-        adapter.dropout = nn.Dropout(pissa_config.lora_dropout)
+    if soara_config.lora_dropout > 0:
+        adapter.dropout = nn.Dropout(soara_config.lora_dropout)
     else:
         adapter.dropout = nn.Identity()
     
     adapter.scaling = 1
     
-    # Training state for Way 1
-    if pissa_config.method == "way1":
+    # Training state for V2 (SOARA-V2)
+    if soara_config.method == "V2":
         adapter.current_layer_index = 0
         adapter.current_cycle = 0
         adapter.step_count = 0
@@ -1745,9 +1745,9 @@ def _create_adapter_from_svd(
 # MODEL REPLACEMENT UTILITIES
 # ============================================================================
 
-def replace_linear_with_rotational_pissa(
+def replace_linear_with_soara(
     model: nn.Module,
-    pissa_config: RotationalPiSSAConfig,
+    soara_config: SOARAConfig,
     target_modules: Optional[List[str]] = None,
     exclude_modules: Optional[List[str]] = None,
     adapter_name: str = "default",
@@ -1755,9 +1755,9 @@ def replace_linear_with_rotational_pissa(
     device: Optional[torch.device] = None,
 ) -> Dict[str, nn.Module]:
     """
-    Replace Linear layers in a model with RotationalLinearLayer.
+    Replace Linear layers in a model with SOARALinearLayer.
     
-    This function implements the PiSSA methodology:
+    This function implements the SOARA methodology:
     1. For each target linear layer with weight W
     2. Computes SVD: W = U @ S @ V^T  
     3. Splits into principal (top-r) and residual components
@@ -1767,7 +1767,7 @@ def replace_linear_with_rotational_pissa(
     
     Args:
         model: The model to modify
-        pissa_config: Configuration for the rotational adapters
+        soara_config: Configuration for the rotational adapters
         target_modules: List of module names to target (e.g., ["q_proj", "v_proj"])
         exclude_modules: List of module names to exclude (e.g., ["pooler", "classifier"])
         adapter_name: Name of the adapter
@@ -1877,7 +1877,7 @@ def replace_linear_with_rotational_pissa(
             
             # Process in sub-batches - create adapters IMMEDIATELY after each sub-batch
             # to avoid accumulating all SVD results in memory (which caused OOM)
-            r = pissa_config.r
+            r = soara_config.r
             adapter_idx = 0  # Track which layer we're on in group_layers
             
             for sub_batch_idx in range(num_sub_batches):
@@ -1946,7 +1946,7 @@ def replace_linear_with_rotational_pissa(
                     
                     # Create adapter with pre-computed SVD (bypass _initialize_svd_components)
                     adapted_layer = _create_adapter_from_svd(
-                        module, pissa_config, adapter_name,
+                        module, soara_config, adapter_name,
                         U_i, S_i, V_i, original_dtype, original_device
                     )
                     
@@ -1975,7 +1975,7 @@ def replace_linear_with_rotational_pissa(
         else:
             # Fallback: sequential processing (single layer or CPU)
             for name, module in group_layers:
-                adapted_layer = RotationalLinearLayer(module, pissa_config, adapter_name)
+                adapted_layer = SOARALinearLayer(module, soara_config, adapter_name)
                 
                 parent_name = ".".join(name.split(".")[:-1])
                 child_name = name.split(".")[-1]

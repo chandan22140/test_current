@@ -11,8 +11,8 @@ from fire import Fire
 #     save_loraga_model_final,
 # )
 from rotational_pissa_unified import (
-    RotationalPiSSAConfig,
-    replace_linear_with_rotational_pissa,
+    SOARAConfig,
+    replace_linear_with_soara,
 )
 # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 from accelerate import Accelerator
@@ -26,12 +26,12 @@ import wandb
 import os
 
 
-def main(lora_alpha=128, lora_rank=None, sample_size=128, seed=42, resume_from_checkpoint=None, track_grad_norm=False, method="way0", total_cycles=4, epochs=1, use_butterfly=False, butterfly_sequential=False):
+def main(lora_alpha=128, lora_rank=None, sample_size=128, seed=42, resume_from_checkpoint=None, track_grad_norm=False, method="v1", total_cycles=4, epochs=0.01, use_butterfly=False, butterfly_sequential=False):
     accelerator = Accelerator()
-    model_id = "google/gemma-7b"
+    model_id = "google/gemma-3-270m"
     model_type = "CausalLM"
     model_dtype = "bf16"
-    dataset_name = "meta_math_full"
+    dataset_name = "meta_math_5k"
 
     # Default rank logic for butterfly
     if lora_rank is None:
@@ -61,13 +61,13 @@ def main(lora_alpha=128, lora_rank=None, sample_size=128, seed=42, resume_from_c
     if butterfly_sequential:
          wandb_name = "butterfly_seq_" + wandb_name
     
-    # wandb_name+="way1"  # Removed hardcoded suffix, now part of config
+    # wandb_name+="V2"  # Removed hardcoded suffix, now part of config
     if accelerator.is_local_main_process:
         wandb.init(
             name=wandb_name,
             mode="online",
             group="test",
-            # CHANGED: Update project name to reflect rotational PiSSA
+            # CHANGED: Update project name to reflect SOARA
             project="Gemma SOARA",
         )
     model, tokenizer = initialize_text_to_text_model(
@@ -76,14 +76,14 @@ def main(lora_alpha=128, lora_rank=None, sample_size=128, seed=42, resume_from_c
     if accelerator.is_local_main_process:
         print(model)
 
-    # CHANGED: Use RotationalPiSSAConfig instead of LoraGAConfig
-    pissa_config = RotationalPiSSAConfig(
+    # CHANGED: Use SOARAConfig instead of LoraGAConfig
+    soara_config = SOARAConfig(
         r=config["r"],
         lora_alpha=config["a"],
-        # CHANGED: Add rotational PiSSA specific parameters
+        # CHANGED: Add SOARA specific parameters
         # CHANGED: Use method argument
         method=method,
-        total_cycles=total_cycles,  # For way1
+        total_cycles=total_cycles,  # For V2
         use_butterfly=use_butterfly,
         butterfly_sequential=butterfly_sequential,
         orthogonality_reg_weight=0,   
@@ -97,21 +97,21 @@ def main(lora_alpha=128, lora_rank=None, sample_size=128, seed=42, resume_from_c
     train_set, val_set, _ = dataset_func()
 
     if accelerator.is_local_main_process:
-        print(pissa_config)
+        print(soara_config)
         print("model:", model)
         # print(val_set)
     
-    # CHANGED: Use replace_linear_with_rotational_pissa instead of get_peft_model
-    # Note: PiSSA doesn't use gradient-guided initialization like LoRA-GA
+    # CHANGED: Use replace_linear_with_soara instead of get_peft_model
+    # Note: SOARA doesn't use gradient-guided initialization like LoRA-GA
     # The SVD decomposition inherently captures the weight structure
     # 
     # Each rank does SVD on its own GPU (accelerator.device) to avoid contention.
     # SVD is deterministic - both ranks get identical results from identical inputs.
     # DeepSpeed will sync parameters during Trainer initialization.
     print(f"[Rank {accelerator.process_index}] Starting SVD initialization on {accelerator.device}...")
-    adapters = replace_linear_with_rotational_pissa(
+    adapters = replace_linear_with_soara(
         model=model,
-        pissa_config=pissa_config,
+        soara_config=soara_config,
         target_modules=find_all_linear_modules(model=model),
         adapter_name="default",
         freeze_base_model=True,
@@ -127,10 +127,10 @@ def main(lora_alpha=128, lora_rank=None, sample_size=128, seed=42, resume_from_c
         os.makedirs(save_dir, exist_ok=True)
         torch.save({
             'model_state_dict': model.state_dict(),
-            'pissa_config': pissa_config,
+            'soara_config': soara_config,
             'adapters': list(adapters.keys()),
         }, os.path.join(save_dir, "init_checkpoint.pt"))
-    print("finish replace_linear_with_rotational_pissa=================================================")
+    print("finish replace_linear_with_soara=================================================")
     
     # Note: No explicit barrier needed here - DeepSpeed Trainer handles 
     # synchronization internally when it wraps the model for distributed training.
@@ -157,8 +157,8 @@ def main(lora_alpha=128, lora_rank=None, sample_size=128, seed=42, resume_from_c
         num_process=accelerator.num_processes,
         gradient_checkpointing=False,
         seed=seed,
-        # CHANGED: Pass pissa_config for orthogonality regularization
-        pissa_config=pissa_config,
+        # CHANGED: Pass soara_config for orthogonality regularization
+        soara_config=soara_config,
         # CHANGED: Pass resume_from_checkpoint for resuming training
         resume_from_checkpoint=resume_from_checkpoint,
         save_total_limit=2, # Retain last 2 checkpoints
@@ -176,7 +176,7 @@ def main(lora_alpha=128, lora_rank=None, sample_size=128, seed=42, resume_from_c
         # CHANGED: Custom save function instead of save_loraga_model_final
         torch.save({
             'model_state_dict': model.state_dict(),
-            'pissa_config': pissa_config,
+            'soara_config': soara_config,
             'adapters': list(adapters.keys()),
         }, os.path.join(save_dir, "final_checkpoint.pt"))
 

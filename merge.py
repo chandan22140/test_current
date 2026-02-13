@@ -1,14 +1,14 @@
 from fire import Fire
-# CHANGED: Import rotational PiSSA instead of PEFT
+# CHANGED: Import SOARA instead of PEFT
 # from peft import PeftModel
-from rotational_pissa_unified import replace_linear_with_rotational_pissa, RotationalPiSSAConfig
+from rotational_pissa_unified import replace_linear_with_soara, SOARAConfig
 from utils import initialize_text_to_text_model
 import os
 import torch
 import torch.nn as nn
 import concurrent.futures
 from functools import partial
-# CHANGED: No need for bnb LoRA layers since we use rotational PiSSA
+# CHANGED: No need for bnb LoRA layers since we use SOARA
 # from peft.tuners.lora.bnb import (
 #     Linear8bitLt as LoraLinear8bitLt,
 #     Linear4bit as LoraLinear4bit,
@@ -51,7 +51,7 @@ def replace_A_with_Linear(model: torch.nn.Module, target):
 
 def dequantize(model, dtype):
     # CHANGED: This function is kept for compatibility but may not be needed
-    # for rotational PiSSA if we don't use quantization
+    # for SOARA if we don't use quantization
     try:
         from bitsandbytes.nn import Linear8bitLt as LoraLinear8bitLt
         from bitsandbytes.nn import Linear4bit as LoraLinear4bit
@@ -65,7 +65,7 @@ def dequantize(model, dtype):
         print("Warning: bitsandbytes not available, skipping dequantization")
 
 
-def process_layer_merge_task(layer_prefix, checkpoint_state_dict, pissa_config, device="cpu", merged_layer_count=0):
+def process_layer_merge_task(layer_prefix, checkpoint_state_dict, soara_config, device="cpu", merged_layer_count=0):
     """
     Worker function to merge a single layer's weights.
     Returns: (layer_prefix, merged_state_dict_subset, logs)
@@ -96,54 +96,54 @@ def process_layer_merge_task(layer_prefix, checkpoint_state_dict, pissa_config, 
     # Get rotation matrices - handle all 4 rotation methods
     r = S.shape[0]
     
-    # Keys for way2/way3 parameters
+    # Keys for v3/V4 parameters
     B_U_key = f"{layer_prefix}.B_U"
     C_U_key = f"{layer_prefix}.C_U"
     B_V_key = f"{layer_prefix}.B_V"
     C_V_key = f"{layer_prefix}.C_V"
     
-    # Key for way1 Givens angles (after final step, these are merged into U/V)
+    # Key for V2 Givens angles (after final step, these are merged into U/V)
     givens_u_key = f"{layer_prefix}.current_givens_u.thetas"
     givens_v_key = f"{layer_prefix}.current_givens_v.thetas"
     
     # Determine rotation method and compute R_U, R_V
-    # Way 0: R_U and R_V stored directly
+    # V1 (SOARA-V1): R_U and R_V stored directly
     if R_U_key in checkpoint_state_dict and R_V_key in checkpoint_state_dict:
         R_U = checkpoint_state_dict[R_U_key]
         R_V = checkpoint_state_dict[R_V_key]
         if merged_layer_count == 0:
-            logs.append(f"  Using rotation method: way0 (direct R_U, R_V)")
+            logs.append(f"  Using rotation method: v1 (direct R_U, R_V)")
     
-    # Way 2/3: Compute R from B, C matrices
+    # v3/3: Compute R from B, C matrices
     elif B_U_key in checkpoint_state_dict and C_U_key in checkpoint_state_dict:
         B_U = checkpoint_state_dict[B_U_key].to(S.dtype)
         C_U = checkpoint_state_dict[C_U_key].to(S.dtype)
         B_V = checkpoint_state_dict[B_V_key].to(S.dtype)
         C_V = checkpoint_state_dict[C_V_key].to(S.dtype)
         
-        # Determine if way2 or way3 based on pissa_config if available
-        use_exp = False  # Default to way2
-        if pissa_config is not None:
-            method = getattr(pissa_config, 'method', 'way2')
-            use_exp = (method == 'way3')
+        # Determine if v3 or V4 based on soara_config if available
+        use_exp = False  # Default to v3
+        if soara_config is not None:
+            method = getattr(soara_config, 'method', 'v3')
+            use_exp = (method == 'V4')
         
         if use_exp:
-            # Way 3: R = exp(BC^T - CB^T)
+            # V4: R = exp(BC^T - CB^T)
             skew_U = B_U @ C_U.T - C_U @ B_U.T
             skew_V = B_V @ C_V.T - C_V @ B_V.T
             R_U = torch.matrix_exp(skew_U.float()).to(S.dtype)
             R_V = torch.matrix_exp(skew_V.float()).to(S.dtype)
             if merged_layer_count == 0:
-                logs.append(f"  Using rotation method: way3 (exp of skew-symmetric)")
+                logs.append(f"  Using rotation method: V4 (exp of skew-symmetric)")
         else:
-            # Way 2: R = I + BC^T - CB^T
+            # v3: R = I + BC^T - CB^T
             I = torch.eye(r, dtype=S.dtype, device=S.device)
             R_U = I + B_U @ C_U.T - C_U @ B_U.T
             R_V = I + B_V @ C_V.T - C_V @ B_V.T
             if merged_layer_count == 0:
-                logs.append(f"  Using rotation method: way2 (I + BC^T - CB^T)")
+                logs.append(f"  Using rotation method: v3 (I + BC^T - CB^T)")
     
-    # Way 1: Givens rotations - after training, rotations are merged into U/V
+    # V2 (SOARA-V2): Givens rotations - after training, rotations are merged into U/V
     # So we use identity here (the rotations are already in U/V)
     elif givens_u_key in checkpoint_state_dict:
         # Givens angles present - need to compute rotation matrix from angles
@@ -155,7 +155,7 @@ def process_layer_merge_task(layer_prefix, checkpoint_state_dict, pissa_config, 
         thetas_v = checkpoint_state_dict[givens_v_key]
         
         # Get the pairings (same as what was used in training)
-        n_layers = pissa_config.n_givens_layers if pissa_config else (r - 1)
+        n_layers = soara_config.n_givens_layers if soara_config else (r - 1)
         pairings = generate_givens_pairings(r, n_layers)[0]  # Use first layer pairings
         
         # Compute rotation matrices from Givens angles
@@ -173,14 +173,14 @@ def process_layer_merge_task(layer_prefix, checkpoint_state_dict, pissa_config, 
                 R_V[p, q], R_V[q, p] = -sin_v[i], sin_v[i]
             
             if merged_layer_count == 0:
-                logs.append(f"  Using rotation method: way1 (Givens angles)")
+                logs.append(f"  Using rotation method: V2 (Givens angles)")
     
     else:
-        # Default: identity (way1 after all rotations merged into U/V)
+        # Default: identity (V2 after all rotations merged into U/V)
         R_U = torch.eye(r, dtype=S.dtype, device=S.device)
         R_V = torch.eye(r, dtype=S.dtype, device=S.device)
         if merged_layer_count == 0:
-            logs.append(f"  Using rotation method: identity (way1 with rotations merged into U/V)")
+            logs.append(f"  Using rotation method: identity (V2 with rotations merged into U/V)")
     
     # Compute scaling
     # NOTE: In rotational_pissa_unified.py line 497, scaling = 1 (lora_alpha/r is commented out)
@@ -228,9 +228,9 @@ def process_layer_merge_task(layer_prefix, checkpoint_state_dict, pissa_config, 
     return layer_prefix, local_state, logs
 
 
-def merge_rotational_pissa_weights(checkpoint_state_dict, base_model, pissa_config=None, device="cpu", num_threads=1):
+def merge_soara_weights(checkpoint_state_dict, base_model, soara_config=None, device="cpu", num_threads=1):
     """
-    Merge Rotational PiSSA adapter weights back into standard linear layer weights.
+    Merge SOARA adapter weights back into standard linear layer weights.
     
     The forward pass computes:
         Y = X @ W_residual + X @ V^T @ R_V^T @ S @ R_U^T @ U^T * scaling
@@ -248,40 +248,40 @@ def merge_rotational_pissa_weights(checkpoint_state_dict, base_model, pissa_conf
     merged_state_dict = {}
     
     # Default config
-    lora_alpha = 8.0 if pissa_config is None else getattr(pissa_config, 'lora_alpha', 8.0)
+    lora_alpha = 8.0 if soara_config is None else getattr(soara_config, 'lora_alpha', 8.0)
     
-    # Find all rotational PiSSA layers by looking for .S parameters
-    pissa_layers = set()
+    # Find all SOARA layers by looking for .S parameters
+    soara_layers = set()
     for key in checkpoint_state_dict.keys():
         if key.endswith('.S'):
-            # print(f"Found PiSSA layer: {key}")
+            # print(f"Found SOARA layer: {key}")
             # Extract the layer prefix (e.g., "model.layers.0.self_attn.q_proj")
             layer_prefix = key[:-2]  # Remove ".S"
             # print(f"Layer prefix: {layer_prefix}")
-            pissa_layers.add(layer_prefix)
+            soara_layers.add(layer_prefix)
     
-    if not pissa_layers:
-        print("No Rotational PiSSA layers found. Returning checkpoint as-is.")
+    if not soara_layers:
+        print("No SOARA layers found. Returning checkpoint as-is.")
         return checkpoint_state_dict
     
-    print(f"Found {len(pissa_layers)} Rotational PiSSA layers to merge")
+    print(f"Found {len(soara_layers)} SOARA layers to merge")
     
     # Process each layer
     merged_layer_count = 0
     
     # Prepare tasks
-    print(f"Merging {len(pissa_layers)} layers with {num_threads} threads...")
+    print(f"Merging {len(soara_layers)} layers with {num_threads} threads...")
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
         futures = []
-        for i, layer_prefix in enumerate(pissa_layers):
+        for i, layer_prefix in enumerate(soara_layers):
             # Pass i as merged_layer_count to allow logging only on first layer (approximately)
             futures.append(
                 executor.submit(
                     process_layer_merge_task, 
                     layer_prefix, 
                     checkpoint_state_dict, 
-                    pissa_config, 
+                    soara_config, 
                     device, 
                     i
                 )
@@ -299,19 +299,19 @@ def merge_rotational_pissa_weights(checkpoint_state_dict, base_model, pissa_conf
                 merged_layer_count += 1
                 
                 if merged_layer_count % 10 == 0:
-                    print(f"Merged {merged_layer_count}/{len(pissa_layers)} layers", end="\r")
+                    print(f"Merged {merged_layer_count}/{len(soara_layers)} layers", end="\r")
                     
             except Exception as e:
                 print(f"Error merging layer: {e}")
                 raise e
                 
-    print(f"\nMerged {merged_layer_count}/{len(pissa_layers)} layers")
+    print(f"\nMerged {merged_layer_count}/{len(soara_layers)} layers")
     
-    # Copy over non-PiSSA layers as-is
+    # Copy over non-SOARA layers as-is
     for key, value in checkpoint_state_dict.items():
-        # Skip PiSSA-specific keys
+        # Skip SOARA-specific keys
         skip = False
-        for layer_prefix in pissa_layers:
+        for layer_prefix in soara_layers:
             if key.startswith(layer_prefix + "."):
                 skip = True
                 break
@@ -319,7 +319,7 @@ def merge_rotational_pissa_weights(checkpoint_state_dict, base_model, pissa_conf
         if not skip:
             merged_state_dict[key] = value
     
-    print(f"Successfully merged {merged_layer_count} Rotational PiSSA layers")
+    print(f"Successfully merged {merged_layer_count} SOARA layers")
     return merged_state_dict
 
 
@@ -335,7 +335,7 @@ def merge(
     num_threads: int = 16, # Default to 16 threads for high CPU usage
 ):
     """
-    Merge Rotational PiSSA adapters back into base model weights.
+    Merge SOARA adapters back into base model weights.
     
     Args:
         checkpoint: Path to the checkpoint directory containing pytorch_model.bin
@@ -362,7 +362,7 @@ def merge(
         init_checkpoint_path = os.path.join(checkpoint, "init_checkpoint.pt")
     
     checkpoint_data = {}
-    pissa_config = None
+    soara_config = None
     
     # Priority 1: Sharded Checkpoint
     if os.path.exists(index_file):
@@ -397,17 +397,17 @@ def merge(
                 checkpoint_data.update(shard_data)
                 del shard_data
                 
-        # Check if pissa_config is in the directory (unlikely for standard sharded saves but check anyway)
+        # Check if soara_config is in the directory (unlikely for standard sharded saves but check anyway)
         # Note: We rely on passed lora_alpha argument if config is missing
         
-    # Priority 2: Custom final_checkpoint.pt (has pissa_config metadata)
+    # Priority 2: Custom final_checkpoint.pt (has soara_config metadata)
     elif os.path.exists(final_checkpoint_path):
         print(f"Loading from final_checkpoint.pt: {final_checkpoint_path}")
         loaded = torch.load(final_checkpoint_path, map_location='cpu', weights_only=False)
         if isinstance(loaded, dict) and 'model_state_dict' in loaded:
             print("loaded was a dict")
             checkpoint_data = loaded['model_state_dict']
-            pissa_config = loaded.get('pissa_config')
+            soara_config = loaded.get('soara_config')
         else:
             checkpoint_data = loaded
 
@@ -422,39 +422,39 @@ def merge(
         loaded = torch.load(init_checkpoint_path, map_location='cpu', weights_only=False)
         if isinstance(loaded, dict) and 'model_state_dict' in loaded:
             checkpoint_data = loaded['model_state_dict']
-            pissa_config = loaded.get('pissa_config')
+            soara_config = loaded.get('soara_config')
         else:
             checkpoint_data = loaded
     else:
         raise FileNotFoundError(f"No checkpoint found in {checkpoint} or {snapshot_path}")
     
-    # Check if this is a Rotational PiSSA checkpoint (has .S, .U, .V, .R_U, .R_V keys)
-    has_pissa_keys = any(k.endswith('.S') for k in checkpoint_data.keys())
+    # Check if this is a SOARA checkpoint (has .S, .U, .V, .R_U, .R_V keys)
+    has_soara_keys = any(k.endswith('.S') for k in checkpoint_data.keys())
     
-    if has_pissa_keys:
-        print("Detected Rotational PiSSA checkpoint. Merging adapters...")
+    if has_soara_keys:
+        print("Detected SOARA checkpoint. Merging adapters...")
         
         # Create a dummy config if not loaded
         class SimpleConfig:
             def __init__(self, alpha):
                 self.lora_alpha = alpha
         
-        if pissa_config is None:
-            pissa_config = SimpleConfig(lora_alpha)
+        if soara_config is None:
+            soara_config = SimpleConfig(lora_alpha)
             print(f"Using lora_alpha={lora_alpha}")
         else:
-            print(f"Using lora_alpha from config: {getattr(pissa_config, 'lora_alpha', lora_alpha)}")
+            print(f"Using lora_alpha from config: {getattr(soara_config, 'lora_alpha', lora_alpha)}")
         
         # Merge the weights
-        merged_state_dict = merge_rotational_pissa_weights(
+        merged_state_dict = merge_soara_weights(
             checkpoint_data, 
             base_model=None,  # Not needed for pure merge
-            pissa_config=pissa_config,
+            soara_config=soara_config,
             device=device,
             num_threads=num_threads
         )
     else:
-        print("No Rotational PiSSA layers detected. Using checkpoint as-is.")
+        print("No SOARA layers detected. Using checkpoint as-is.")
         merged_state_dict = checkpoint_data
     
     # Now load the base model and apply merged weights

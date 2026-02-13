@@ -273,7 +273,7 @@ def train_text_to_text_model(
         **kwargs.get("training_args", {}),
     )
 
-    # CHANGED: Pass pissa_config to LogTrainer for orthogonality regularization
+    # CHANGED: Pass soara_config to LogTrainer for orthogonality regularization
     trainer = TrainerClass(
         model=model,
         args=training_args,
@@ -285,7 +285,7 @@ def train_text_to_text_model(
                 early_stopping_patience=kwargs.get("early_stopping_patience", 1)
             ),
         ],
-        pissa_config=kwargs.get("pissa_config", None),  # CHANGED: Added pissa_config
+        soara_config=kwargs.get("soara_config", None),  # CHANGED: Added soara_config
         s_lr_multiplier=kwargs.get("s_lr_multiplier", 10.0),  # CHANGED: Higher LR for S params
     )
 

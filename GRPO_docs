@@ -1,0 +1,433 @@
+Below is a curated “mini‑doc set” + concrete integration recipe so you can plug GRPO from TRL into a custom PEFT (LoRA/QLoRA/etc.) codebase.
+
+1. Core GRPO + TRL documentation
+These are the primary docs you actually need; everything else is either theory or extra patterns.
+
+1.1 GRPOTrainer API (official TRL docs)
+GRPOTrainer documentation: full API, arguments, logging keys, reward function signatures, tools/agent support, etc.
+
+Key points from the docs:
+
+model can be str | PreTrainedModel | PeftModel.
+
+reward_funcs can be:
+
+a reward model id (str),
+
+a PreTrainedModel used as reward model,
+
+a callable reward function,
+
+or a list mixing the above.
+
+Reward function signature is flexible but in the most general form it can receive:
+
+prompts
+
+completions
+
+completion_ids
+
+trainer_state
+
+plus any extra columns from the dataset.
+
+Supports synchronous + async reward functions and multiple reward functions (with optional reward_weights).
+
+Supports tools argument for agent-style training (function/tool calling).
+
+This is the canonical reference for how to instantiate GRPOTrainer and what you are allowed to pass as model/reward/processing.
+
+​
+
+1.2 GRPOConfig (training hyperparameters)
+grpo_config.py in TRL repo: defines GRPOConfig dataclass with all algorithm- and training-related flags.
+​
+Important knobs you’ll typically care about:
+
+Generation:
+
+num_generations (G): number of completions per prompt.
+
+max_prompt_length, max_completion_length.
+
+Sampling params: temperature, top_k, top_p, do_sample.
+
+RL hyperparams:
+
+learning_rate, num_train_epochs / max_steps, warmup_steps.
+
+beta: KL penalty coefficient (if non-zero, KL between policy and ref model is computed).
+
+clip_epsilon: clipping coefficient in GRPO surrogate objective.
+
+num_iterations: how many gradient steps per generation batch (on-policy/off-policy style).
+
+Performance / infra:
+
+per_device_train_batch_size, gradient_accumulation_steps.
+
+use_vllm and related fields for offloading generation to vLLM (optional).
+​
+
+​
+
+1.3 Practical quickstart in the HF LLM course
+“Implementing GRPO in TRL” in the Hugging Face LLM course: short, code-first tutorial showing the minimal things you must do: dataset, reward function, GRPOConfig, GRPOTrainer.
+
+Minimal pattern from there:
+
+Load dataset.
+
+Define reward function reward_func(completions, **kwargs) -> list[float].
+
+Configure training_args = GRPOConfig(...).
+
+trainer = GRPOTrainer(model=..., args=training_args, train_dataset=..., reward_funcs=reward_func).
+
+trainer.train().
+
+​
+
+2. Theory + “how GRPO actually works”
+You likely know PPO; these resources map GRPO specifically:
+
+The Illustrated GRPO: Group Relative Policy Optimization Explained – extremely detailed but readable explanation, with math, toy implementation, and mapping to TRL’s industrial implementation.
+​
+Especially useful if you want to:
+
+Re-implement/modify GRPO logic in a custom trainer.
+
+Understand where in TRL code each theoretical step lives (group sampling, reward normalization, clipped surrogate, etc.).
+
+​
+
+Revisiting Group Relative Policy Optimization (arXiv) – more recent paper that discusses on‑policy / off‑policy variants, vLLM serving, configuration knobs.
+​
+
+​
+
+Verl’s GRPO docs – alternative implementation, but very clear breakdown of concepts (group sampling, no critic, relative rewards).
+​
+
+​
+
+3. TRL + infra notes (vLLM, examples, issues)
+vLLM + TRL integration: generic TRL docs describing how online methods like GRPO and Online DPO can use vLLM for generation via use_vllm in GRPOConfig.
+​
+
+​
+
+Modal example: coding tasks with GRPO + TRL – end-to-end script that runs GRPOTrainer on Modal; shows environment setup, multi-node env vars, and start_grpo_trainer(use_vllm=True, ...) patterns.
+​
+
+​
+
+Known issues with GRPOTrainer versions:
+
+Issue about main-branch GRPOTrainer mismatch vs v0.14.0 working properly; worth skimming to avoid hitting a broken commit.
+​
+
+Issue on a specific line in grpo_trainer.py re: reference model difference; if you’re inspecting/monkey-patching the trainer, this is relevant.
+​
+
+​
+
+​
+
+4. PEFT / LoRA + GRPO: existing patterns
+Community guide: GRPO + TRL on Windows with LoRA and 4-bit quantization – demonstrates running GRPO with TRL on consumer GPUs, using LoRA and 4‑bit (QLoRA‑style) models.
+​
+Useful for:
+
+Confirming that PeftModel + quantization works with GRPOTrainer.
+
+Looking at working training arguments tuned for small VRAM.
+
+​
+
+5. How to plug GRPO into a custom PEFT codebase
+Assuming your codebase already does PEFT fine-tuning (e.g., SFT with LoRA/QLoRA) on top of a HF AutoModelForCausalLM model, integration boils down to:
+
+5.1 Dependencies and versions
+Install TRL with GRPO support plus the usual stack:
+
+bash
+pip install "trl>=0.14.0" "transformers>=4.44.0" "accelerate>=0.33.0" "peft>=0.12.0" datasets bitsandbytes
+Given the open issues on certain main-branch commits, consider pinning to a released TRL version where GRPO is known to be stable; cross-check the latest GRPO issues in the repo.
+​
+
+​
+
+5.2 Load base model + PEFT adapter
+You can reuse your existing PEFT loading logic almost 1:1. The key is: pass a PeftModel (or any PreTrainedModel) to GRPOTrainer.
+
+Example (QLoRA-ish pattern):
+
+python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import LoraConfig, get_peft_model
+import torch
+
+base_model_id = "Qwen/Qwen2.5-0.5B-Instruct"
+
+tokenizer = AutoTokenizer.from_pretrained(base_model_id)
+tokenizer.padding_side = "left"
+tokenizer.pad_token = tokenizer.eos_token
+
+base_model = AutoModelForCausalLM.from_pretrained(
+    base_model_id,
+    torch_dtype=torch.bfloat16,
+    device_map="auto",
+    load_in_4bit=True,          # if you want QLoRA-style
+)
+
+lora_config = LoraConfig(
+    r=64,
+    lora_alpha=16,
+    lora_dropout=0.05,
+    target_modules=["q_proj", "v_proj"],  # adapt for your arch
+    bias="none",
+    task_type="CAUSAL_LM",
+)
+
+peft_model = get_peft_model(base_model, lora_config)
+If you already have a fine-tuned adapter:
+
+python
+from peft import PeftModel
+
+peft_model = PeftModel.from_pretrained(
+    base_model,
+    "path_or_repo_to_peft_adapter",
+)
+Then pass peft_model directly to GRPOTrainer; the docs explicitly accept PeftModel as model.
+​
+
+​
+
+5.3 Dataset format
+GRPOTrainer is an online RL trainer: it generates completions from your policy for each batch of prompts and then computes rewards.
+
+At minimum, you need a dataset whose items contain a prompt field (or chat messages) that the trainer can turn into model inputs. There are a few patterns:
+
+Plain text prompts (simplest, matches the LLM course example):
+​
+Dataset rows like:
+
+python
+{
+    "prompt": "User question / problem",
+    "answer": "reference answer or meta info (optional, used in reward_fn)"
+}
+Then, in GRPOConfig, you can specify how to read from this field via dataset_* options or simply let the processing class (see below) take care of it.
+
+Chat-style messages, which TRL increasingly prefers (esp. for chat models):
+​
+
+python
+{
+    "messages": [
+        {"role": "user", "content": "Explain X..."},
+        # optionally system or assistant reference messages, depending on your design
+    ],
+    "target": "reference answer or metadata; optional"
+}
+For a custom codebase, you usually already have a preprocessing / formatting function. The trick is:
+
+Either:
+
+wrap that formatting logic in a processing_class passed to GRPOTrainer (see next section), or
+
+Simply pass processing_class=tokenizer if your tokenizer already handles chat templates and the dataset field is the raw text you’d feed into SFT.
+​
+
+​
+
+5.4 Processing class (how inputs/outputs are tokenized)
+GRPOTrainer uses a processing class to:
+
+Take dataset rows → tokenize prompts.
+
+Decode generated token ids → completions for reward functions.
+
+Simplest option (and often enough if your current SFT code just tokenizes text) is:
+
+python
+from trl import GRPOConfig, GRPOTrainer
+
+training_args = GRPOConfig(
+    # sampling & training hyperparams
+    per_device_train_batch_size=1,
+    num_generations=4,
+    max_prompt_length=256,
+    max_completion_length=768,
+    output_dir="outputs/grpo-peft",
+    # etc...
+)
+
+trainer = GRPOTrainer(
+    model=peft_model,
+    processing_class=tokenizer,  # tokenizer as processing class
+    train_dataset=train_dataset,
+    args=training_args,
+    reward_funcs=reward_func,
+)
+If you need something more custom (special BOS/EOS, multiple fields fused into a single prompt, multi-turn history, etc.), define a dedicated processing class or formatting function as shown in the Illustrated GRPO doc and TRL examples.
+
+​
+
+5.5 Reward function design
+Reward function is where you bake in your task-specific signal. TRL’s GRPO docs describe several options and show examples for format-checking and accuracy-based rewards.
+​
+
+General signature you can rely on (superset):
+
+python
+def reward_func(
+    prompts=None,
+    completions=None,
+    completion_ids=None,
+    trainer_state=None,
+    **kwargs,
+) -> list[float]:
+    ...
+prompts: the prompts used to generate each group.
+
+completions: generated completions; for chat models usually something like:
+
+python
+[
+    [{"role": "assistant", "content": "<think>...</think><answer>...</answer>"}],
+    ...
+]
+completion_ids: token IDs if you need token-level features.
+
+trainer_state: can be used for curriculum / dynamic rewards (e.g. ramping difficulty).
+
+Example: strict format-check reward (from docs pattern):
+​
+
+python
+import re
+
+def format_reward_func(completions, **kwargs):
+    pattern = r"^<think>.*?</think><answer>.*?</answer>$"
+    contents = [completion[0]["content"] for completion in completions]
+    return [1.0 if re.match(pattern, c) else 0.0 for c in contents]
+Then plug it in:
+
+python
+trainer = GRPOTrainer(
+    model=peft_model,
+    processing_class=tokenizer,
+    train_dataset=train_dataset,
+    args=training_args,
+    reward_funcs=format_reward_func,
+)
+You can also pass a list of reward functions (sync & async mixed), with optional reward_weights in GRPOConfig; GRPOTrainer then sums them (or weighted sum).
+​
+
+​
+
+5.6 Running training with PEFT + GRPO
+Putting pieces together:
+
+python
+from datasets import load_dataset
+from trl import GRPOConfig, GRPOTrainer
+
+# 1. Dataset
+dataset = load_dataset("your_dataset_id_or_script", split="train")
+
+# 2. Reward function
+def reward_func(completions, prompts=None, **kwargs):
+    # toy example: length reward
+    return [float(len(c[0]["content"])) for c in completions]
+
+# 3. GRPO config
+training_args = GRPOConfig(
+    output_dir="outputs/grpo-peft",
+    num_train_epochs=1,
+    per_device_train_batch_size=1,
+    gradient_accumulation_steps=4,
+    logging_steps=10,
+    num_generations=4,
+    max_prompt_length=256,
+    max_completion_length=512,
+    learning_rate=5e-6,
+    # RL‑specific knobs
+    clip_epsilon=0.2,
+    beta=0.0,         # set > 0 to enforce KL to reference policy
+    num_iterations=1, # steps per generation batch
+    # use_vllm=True,  # optional if you integrate vLLM
+)
+
+# 4. Trainer
+trainer = GRPOTrainer(
+    model=peft_model,           # your PEFT-wrapped model
+    processing_class=tokenizer, # or custom processing class
+    train_dataset=dataset,
+    args=training_args,
+    reward_funcs=reward_func,
+)
+
+# 5. Train
+trainer.train()
+If you want a frozen reference model (for KL regularization) different from the trainable PEFT policy, you can pass reference_model and use beta > 0 in config (see GRPO docs).
+​
+
+​
+
+5.7 Aligning with your existing SFT / PEFT pipeline
+To minimize refactoring in a custom codebase:
+
+Reuse:
+
+Model loading + PEFT init unchanged.
+
+Tokenizer and possibly your existing chat template logic.
+
+Data loading; just ensure dataset fields match what the processing class expects.
+
+Swap:
+
+Replace your SFT Trainer/custom loop with GRPOTrainer.
+
+Add:
+
+Reward function(s).
+
+GRPOConfig (instead of TrainingArguments / SFTConfig etc.).
+
+Conceptually, GRPO is just changing your objective from supervised cross-entropy on reference outputs to a group-wise normalized RL loss based on rewards for generated outputs.
+
+6. If you need to go lower-level than GRPOTrainer
+If your “custom PEFT codebase” has its own tightly controlled training loop and you only want to borrow algorithmic pieces:
+
+Use:
+
+Illustrated GRPO for the clean algorithm and simplified PyTorch implementation.
+​
+
+grpo_trainer.py and grpo_config.py in TRL repo as concrete reference for how HF does:
+
+Group sampling and batched generation.
+
+Reward aggregation and normalization.
+
+KL + clipping + loss computation.
+
+Then:
+
+Keep your existing optimizer, grad scaling, logging, sharding strategy.
+
+Implement:
+
+Sample G completions per prompt.
+
+Compute rewards and group-wise normalized advantages.
+
+Compute GRPO clipped surrogate loss and backprop through your PEFT model parameters only.
+
+This lets you retain full control over training infra while staying algorithmically aligned with TRL.

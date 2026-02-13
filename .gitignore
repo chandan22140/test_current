@@ -11,6 +11,10 @@ results/
 
 # Snapshots or checkpoints
 snapshot/
+py3110/
+py3100/
+venv310/
+unsloth_compiled_cache/
 
 # Weights & Biases logs
 wandb/
@@ -19,3 +23,7 @@ data/
 
 # Telegram Bot
 telegram_bot/
+
+# Additional ignored directories
+logs/
+grpo_trainer_lora_model/

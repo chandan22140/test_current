@@ -63,54 +63,56 @@ Visit our docs for all our [model uploads](https://unsloth.ai/docs/get-started/u
 # !uv pip install transformers==4.56.2
 # !uv pip install --no-deps trl==0.22.2
 
-"""### Unsloth
+"""### SOARA Setup
 
-Load up `Llama 3.1 8B Instruct`, and set parameters
+Load up `Llama 3.1 8B Instruct` with SOARA adapter
 """
 
-# import torch
-# try:
-#     import torch._inductor.config
-# except ImportError:
-#     pass
-from unsloth import FastLanguageModel
+import sys
+sys.path.insert(0, "/home/chandan/test_current/peft/src")
+
 import torch
-from rotational_pissa_unified import RotationalPiSSAConfig, replace_linear_with_rotational_pissa
-from utils import find_all_linear_modules
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import get_peft_model, SOARAConfig
+from get_chat_template import get_chat_template
 
-max_seq_length = 1024 # Can increase for longer reasoning traces
-METAMATH_VERSION = "full" # Options: "full" or "5k"
-lora_rank = 2 # Larger rank = smarter, but slower
+max_seq_length = 1024  # Can increase for longer reasoning traces
+soara_rank = 128  # SOARA rank (number of principal SVD components)
 
-model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name = "meta-llama/Llama-3.2-3B-Instruct",
-    max_seq_length = max_seq_length,
-    load_in_4bit = False, # Must be False for RotationalPiSSA (SVD needs float weights)
-    fast_inference = True, # Enable vllm fast inference
-    max_lora_rank = lora_rank,
-    gpu_memory_utilization = 0.5, # Reduce if out of memory
+# Load model in bf16 (SOARA needs full-precision weights for SVD decomposition)
+# model_name = "meta-llama/Llama-3.1-8B"
+model_name = "meta-llama/Llama-3.1-8B-Instruct"
+
+
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+tokenizer.pad_token = tokenizer.eos_token
+tokenizer.padding_side = "left"
+# Instruct model already has a built-in chat template, no need for get_chat_template
+
+model = AutoModelForCausalLM.from_pretrained(
+    model_name,
+    torch_dtype=torch.bfloat16,
+    device_map="auto",
 )
 
-# CHANGED: Use RotationalPiSSA instead of default LoRA (like float_llama2-7b_metamath.py)
-pissa_config = RotationalPiSSAConfig(
-    r = lora_rank,
-    lora_alpha = lora_rank,
-    method = "way0",
-    orthogonality_reg_weight = 0,
-    init_identity = True,
-    freeze_singular_values = False,
-    quantize_residual = False,
-    quantize_base_components = False,
-)
+# Enable gradient checkpointing for memory efficiency
+# model.gradient_checkpointing_enable()
 
-adapters = replace_linear_with_rotational_pissa(
-    model = model,
-    pissa_config = pissa_config,
-    target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-    adapter_name = "default",
-    freeze_base_model = True,
-    device = torch.device("cuda"),
+# Apply SOARA adapter
+soara_config = SOARAConfig(
+    r=soara_rank,
+    target_modules=[
+        "q_proj", "k_proj", "v_proj", "o_proj",
+        "gate_proj", "up_proj", "down_proj",
+    ],  # Remove QKVO if out of memory
+    method="v1",  # v1=direct+reg, V2=Givens/butterfly, v3=skew-sym, V4=matrix-exp
+    orthogonality_reg_weight=0,
+    soara_dropout=0.0,
+    quantize_residual=False,  # Set True to NF4-quantize frozen residual (saves memory)
+    s_dtype_fp32=True,
 )
+model = get_peft_model(model, soara_config)
+model.print_trainable_parameters()
 
 """### Data Prep
 <a name="Data"></a>
@@ -123,85 +125,183 @@ from datasets import load_dataset, Dataset
 
 # Load and prep dataset
 SYSTEM_PROMPT = """
-You are a math problem solver. Show your reasoning step by step, then give the final numerical answer on the last line in the format:
-#### <number>
+Respond in the following format:
+<reasoning>
+...
+</reasoning>
+<answer>
+...
+</answer>
 """
 
-def extract_hash_answer(text: str) -> str:
-    """Extract answer from #### format used by GSM8K."""
+XML_COT_FORMAT = """\
+<reasoning>
+{reasoning}
+</reasoning>
+<answer>
+{answer}
+</answer>
+"""
+
+def extract_xml_answer(text: str) -> str:
+    answer = text.split("<answer>")[-1]
+    answer = answer.split("</answer>")[0]
+    return answer.strip()
+
+def extract_hash_answer(text: str) -> str | None:
     if "####" not in text:
-        return text.strip().split()[-1] if text.strip() else ""
-    return text.split("####")[-1].strip()
-
-def extract_metamath_answer(text: str) -> str | None:
-    if "The answer is:" not in text:
         return None
-    return text.split("The answer is:")[-1].strip().rstrip(".")
+    return text.split("####")[1].strip()
 
-def get_metamath_questions(version = "full") -> Dataset:
-    data = load_dataset('meta-math/MetaMathQA', split='train')
-    if version == "5k":
-        data = data.filter(lambda x: "GSM" in x["type"])
-        data = data.shuffle(seed=42).select(range(min(5000, len(data))))
+# Derived from eval_gsm8k.py
+from typing import Optional, Union
+def extract_boxed_answer(text: str) -> Optional[str]:
+    boxed_pattern = r'\\boxed\{([^}]+)\}'
+    matches = re.findall(boxed_pattern, text)
+    if matches:
+        answer = matches[-1].strip()
+        frac_pattern = r'\\frac\{(\d+)\}\{(\d+)\}'
+        frac_match = re.search(frac_pattern, answer)
+        if frac_match:
+            return str(float(frac_match.group(1)) / float(frac_match.group(2)))
+        dfrac_pattern = r'\\dfrac\{(\d+)\}\{(\d+)\}'
+        dfrac_match = re.search(dfrac_pattern, answer)
+        if dfrac_match:
+            return str(float(dfrac_match.group(1)) / float(dfrac_match.group(2)))
+        return answer.replace('$', '').replace(',', '').strip()
+    return None
+
+def extract_gsm8k_answer_fallback(text: str) -> Optional[str]:
+    pattern = r'####\s*([+-]?\d+(?:,\d{3})*(?:\.\d+)?)'
+    match = re.search(pattern, text)
+    if match:
+        return match.group(1).replace(',', '').strip()
+    return None
+
+def extract_numerical_answer(text: str) -> Optional[float]:
+    answer_markers = [
+        r'Final Answer[:\s]+([+-]?\d+\.?\d*)',
+        r'Therefore[,\s]+(?:the answer is\s+)?([+-]?\d+\.?\d*)',
+        r'The answer is[:\s]+([+-]?\d+\.?\d*)',
+        r'Answer[:\s]+([+-]?\d+\.?\d*)',
+        r'= ([+-]?\d+\.?\d*)\s*$',
+    ]
+    for pattern in answer_markers:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            try: return float(match.group(1))
+            except ValueError: continue
+    boxed = extract_boxed_answer(text)
+    if boxed:
+        try: return float(re.sub(r'[^\d\.\-\+]', '', boxed))
+        except ValueError: pass
+    sentences = text.split('.')
+    for sentence in reversed(sentences[-5:]):
+        numbers = re.findall(r'[+-]?\d+\.?\d*', sentence)
+        if numbers:
+            try: return float(numbers[-1])
+            except ValueError: continue
+    return None
+
+def extract_answer(text: str) -> tuple:
+    gsm8k_answer = extract_gsm8k_answer_fallback(text)
+    if gsm8k_answer:
+        try: return int(float(gsm8k_answer.replace(',', ''))), "gsm8k"
+        except ValueError: pass
+    boxed_answer = extract_boxed_answer(text)
+    if boxed_answer:
+        try: return int(float(re.sub(r'[^\d\.\-\+]', '', boxed_answer))), "boxed"
+        except ValueError: pass
+    numerical_answer = extract_numerical_answer(text)
+    if numerical_answer is not None:
+        try: return int(numerical_answer), "numerical"
+        except (ValueError, OverflowError): pass
+    return 0, "none"
+
+
+# uncomment middle messages for 1-shot prompting
+def get_gsm8k_questions(split = "train") -> Dataset:
+    data = load_dataset('openai/gsm8k', 'main')[split] # type: ignore
     data = data.map(lambda x: { # type: ignore
         'prompt': [
             {'role': 'system', 'content': SYSTEM_PROMPT},
-            {'role': 'user', 'content': x['query']}
+            {'role': 'user', 'content': x['question']}
         ],
-        'answer': extract_metamath_answer(x['response'])
+        'answer': extract_hash_answer(x['answer'])
     }) # type: ignore
-    data = data.filter(lambda x: x['answer'] is not None) # type: ignore
     return data # type: ignore
 
-dataset = get_metamath_questions(version=METAMATH_VERSION)
+def extract_metamath_answer(text: str) -> str | None:
+    if "The answer is:" in text:
+        return text.split("The answer is:")[-1].strip()
+    return None
+
+def get_metamath_questions(split = "train") -> Dataset:
+    # Load the MetaMathQA dataset
+    data = load_dataset('meta-math/MetaMathQA')[split] # type: ignore
+    
+    # Preprocess to match GRPO expected format
+    def preprocess_metamath(x):
+        return {
+            'prompt': [
+                {'role': 'system', 'content': SYSTEM_PROMPT},
+                {'role': 'user', 'content': x['query']}
+            ],
+            'answer': extract_metamath_answer(x['response'])
+        }
+        
+    data = data.map(preprocess_metamath) 
+    # Filter out examples where answer extraction failed
+    data = data.filter(lambda x: x['answer'] is not None)
+    return data
+
+# Use MetaMathQA for training
+dataset = get_metamath_questions()
 
 # Reward functions
 def correctness_reward_func(prompts, completions, answer, **kwargs) -> list[float]:
     responses = [completion[0]['content'] for completion in completions]
     q = prompts[0][-1]['content']
-    extracted_responses = [extract_hash_answer(r) for r in responses]
+    extracted_responses = [extract_xml_answer(r) for r in responses]
     print('-'*20, f"Question:\n{q}", f"\nAnswer:\n{answer[0]}", f"\nResponse:\n{responses[0]}", f"\nExtracted:\n{extracted_responses[0]}")
     return [2.0 if r == a else 0.0 for r, a in zip(extracted_responses, answer)]
 
 def int_reward_func(completions, **kwargs) -> list[float]:
     responses = [completion[0]['content'] for completion in completions]
-    extracted_responses = [extract_hash_answer(r) for r in responses]
+    extracted_responses = [extract_xml_answer(r) for r in responses]
     return [0.5 if r.isdigit() else 0.0 for r in extracted_responses]
 
 def strict_format_reward_func(completions, **kwargs) -> list[float]:
-    """Reward function that checks if the completion ends with #### <number>."""
-    pattern = r".*\n####\s*\d+\s*$"
+    """Reward function that checks if the completion has a specific format."""
+    pattern = r"^<reasoning>\n.*?\n</reasoning>\n<answer>\n.*?\n</answer>\n$"
     responses = [completion[0]["content"] for completion in completions]
-    matches = [re.match(pattern, r, re.DOTALL) for r in responses]
+    matches = [re.match(pattern, r) for r in responses]
     return [0.5 if match else 0.0 for match in matches]
 
 def soft_format_reward_func(completions, **kwargs) -> list[float]:
-    """Reward function that checks if the completion contains #### <number>."""
-    pattern = r"####\s*\d+"
+    """Reward function that checks if the completion has a specific format."""
+    pattern = r"<reasoning>.*?</reasoning>\s*<answer>.*?</answer>"
     responses = [completion[0]["content"] for completion in completions]
-    matches = [re.search(pattern, r) for r in responses]
+    matches = [re.match(pattern, r) for r in responses]
     return [0.5 if match else 0.0 for match in matches]
 
-def count_format(text) -> float:
-    """Reward function that scores how well the output follows #### format."""
+def count_xml(text) -> float:
     count = 0.0
-    # Reward for having exactly one #### marker
-    if text.count("####") == 1:
-        count += 0.25
-        # Reward for #### being near the end
-        hash_pos = text.find("####")
-        remaining = text[hash_pos + 4:].strip()
-        if remaining and remaining.replace('.', '').replace('-', '').isdigit():
-            count += 0.25  # Answer after #### is a number
-        # Penalize text after the #### answer line
-        after_hash_lines = text.split("####")[-1].strip().split("\n")
-        if len(after_hash_lines) <= 1:
-            count += 0.125  # No extra lines after ####
+    if text.count("<reasoning>\n") == 1:
+        count += 0.125
+    if text.count("\n</reasoning>\n") == 1:
+        count += 0.125
+    if text.count("\n<answer>\n") == 1:
+        count += 0.125
+        count -= len(text.split("\n</answer>\n")[-1])*0.001
+    if text.count("\n</answer>") == 1:
+        count += 0.125
+        count -= (len(text.split("\n</answer>")[-1]) - 1)*0.001
     return count
 
-def format_reward_func(completions, **kwargs) -> list[float]:
+def xmlcount_reward_func(completions, **kwargs) -> list[float]:
     contents = [completion[0]["content"] for completion in completions]
-    return [count_format(c) for c in contents]
+    return [count_xml(c) for c in contents]
 
 """<a name="Train"></a>
 ### Train the model
@@ -213,25 +313,29 @@ max_prompt_length = 256
 
 from trl import GRPOConfig, GRPOTrainer
 training_args = GRPOConfig(
-    learning_rate = 5e-6,
+    learning_rate = 2e-5, # Increased LR for faster convergence (was 5e-6)
     adam_beta1 = 0.9,
     adam_beta2 = 0.99,
     weight_decay = 0.1,
-    warmup_ratio = 0.1,
+    warmup_ratio = 0.03, # Reduced warmup (was 0.1)
     lr_scheduler_type = "cosine",
     optim = "paged_adamw_8bit",
     logging_steps = 1,
     per_device_train_batch_size = 1,
-    gradient_accumulation_steps = 1, # Increase to 4 for smoother training
-    num_generations = 6, # Decrease if out of memory
-    max_prompt_length = max_prompt_length,
-    max_completion_length = max_seq_length - max_prompt_length,
-    # num_train_epochs = 1, # Set to 1 for a full training run
-    max_steps = 250,
-    save_steps = 250,
-    max_grad_norm = 0.1,
+    gradient_accumulation_steps = 4, # Increased to 4 (was 1)
+    num_generations = 6, # Must divide evenly into per_device_train_batch_size
+    generation_batch_size = 6, # Must be divisible by num_generations
+    # max_prompt_length = max_prompt_length,
+    max_completion_length = max_seq_length,
+    num_train_epochs = 1, # Full training on MetaMathQA
+    # max_steps = 250,
+    save_steps = 500,
+    max_grad_norm = 0.0, # Disable clipping (was 0.1)
     report_to = "none", # Can use Weights & Biases
     output_dir = "outputs",
+    use_vllm = True, # Enable vLLM
+    vllm_mode = "colocate", # Run vLLM in the same process
+    vllm_gpu_memory_utilization = 0.7,
 )
 
 """And let's run the trainer! If you scroll up, you'll see a table of rewards. The goal is to see the `reward` column increase!
@@ -249,7 +353,7 @@ trainer = GRPOTrainer(
     model = model,
     processing_class = tokenizer,
     reward_funcs = [
-        format_reward_func,
+        xmlcount_reward_func,
         soft_format_reward_func,
         strict_format_reward_func,
         int_reward_func,
@@ -262,127 +366,128 @@ trainer.train()
 
 """<a name="Inference"></a>
 ### Inference
-Now let's try the model we just trained! First, let's first try the model without any GRPO trained:
+Now let's try the model we just trained!
 """
-
-text = tokenizer.apply_chat_template([
-    {"role" : "user", "content" : "Calculate pi."},
-], tokenize = False, add_generation_prompt = True)
-
-from vllm import SamplingParams
-sampling_params = SamplingParams(
-    temperature = 0.8,
-    top_p = 0.95,
-    max_tokens = 1024,
-)
-output = model.fast_generate(
-    [text],
-    sampling_params = sampling_params,
-    lora_request = None,
-)[0].outputs[0].text
-
-output
-
-"""And now with the LoRA we just trained with GRPO - we first save the LoRA first!"""
-
-model.save_lora("grpo_saved_lora")
-
-"""Now we load the LoRA and test:"""
 
 text = tokenizer.apply_chat_template([
     {"role" : "system", "content" : SYSTEM_PROMPT},
     {"role" : "user", "content" : "Calculate pi."},
 ], tokenize = False, add_generation_prompt = True)
 
-from vllm import SamplingParams
-sampling_params = SamplingParams(
-    temperature = 0.8,
-    top_p = 0.95,
-    max_tokens = 1024,
-)
-output = model.fast_generate(
-    text,
-    sampling_params = sampling_params,
-    lora_request = model.load_lora("grpo_saved_lora"),
-)[0].outputs[0].text
-
-output
-
-"""Our reasoning model is much better - it's not always correct, since we only trained it for an hour or so - it'll be better if we extend the sequence length and train for longer!
-
-<a name="Save"></a>
-### Saving to float16 for VLLM
-
-We also support saving to `float16` directly. Select `merged_16bit` for float16 or `merged_4bit` for int4. We also allow `lora` adapters as a fallback. Use `push_to_hub_merged` to upload to your Hugging Face account! You can go to https://huggingface.co/settings/tokens for your personal tokens. See [our docs](https://unsloth.ai/docs/basics/inference-and-deployment) for more deployment options.
-"""
-
-# Merge to 16bit
-if False: model.save_pretrained_merged("llama_finetune_16bit", tokenizer, save_method = "merged_16bit",)
-if False: model.push_to_hub_merged("HF_USERNAME/llama_finetune_16bit", tokenizer, save_method = "merged_16bit", token = "YOUR_HF_TOKEN")
-
-# Merge to 4bit
-if False: model.save_pretrained_merged("llama_finetune_4bit", tokenizer, save_method = "merged_4bit",)
-if False: model.push_to_hub_merged("HF_USERNAME/llama_finetune_4bit", tokenizer, save_method = "merged_4bit", token = "YOUR_HF_TOKEN")
-
-# Just LoRA adapters
-if False:
-    model.save_pretrained("llama_lora")
-    tokenizer.save_pretrained("llama_lora")
-if False:
-    model.push_to_hub("HF_USERNAME/llama_lora", token = "YOUR_HF_TOKEN")
-    tokenizer.push_to_hub("HF_USERNAME/llama_lora", token = "YOUR_HF_TOKEN")
-
-"""### GGUF / llama.cpp Conversion
-To save to `GGUF` / `llama.cpp`, we support it natively now! We clone `llama.cpp` and we default save it to `q8_0`. We allow all methods like `q4_k_m`. Use `save_pretrained_gguf` for local saving and `push_to_hub_gguf` for uploading to HF.
-
-Some supported quant methods (full list on our [docs page](https://unsloth.ai/docs/basics/inference-and-deployment/saving-to-gguf)):
-* `q8_0` - Fast conversion. High resource use, but generally acceptable.
-* `q4_k_m` - Recommended. Uses Q6_K for half of the attention.wv and feed_forward.w2 tensors, else Q4_K.
-* `q5_k_m` - Recommended. Uses Q6_K for half of the attention.wv and feed_forward.w2 tensors, else Q5_K.
-
-[**NEW**] To finetune and auto export to Ollama, try our [Ollama notebook](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Llama3_(8B)-Ollama.ipynb)
-"""
-
-# Save to 8bit Q8_0
-if False: model.save_pretrained_gguf("llama_finetune", tokenizer,)
-# Remember to go to https://huggingface.co/settings/tokens for a token!
-# And change hf to your username!
-if False: model.push_to_hub_gguf("HF_USERNAME/llama_finetune", tokenizer, token = "YOUR_HF_TOKEN")
-
-# Save to 16bit GGUF
-if False: model.save_pretrained_gguf("llama_finetune", tokenizer, quantization_method = "f16")
-if False: model.push_to_hub_gguf("HF_USERNAME/llama_finetune", tokenizer, quantization_method = "f16", token = "YOUR_HF_TOKEN")
-
-# Save to q4_k_m GGUF
-if False: model.save_pretrained_gguf("llama_finetune", tokenizer, quantization_method = "q4_k_m")
-if False: model.push_to_hub_gguf("HF_USERNAME/llama_finetune", tokenizer, quantization_method = "q4_k_m", token = "YOUR_HF_TOKEN")
-
-# Save to multiple GGUF options - much faster if you want multiple!
-if False:
-    model.push_to_hub_gguf(
-        "HF_USERNAME/llama_finetune", # Change hf to your username!
-        tokenizer,
-        quantization_method = ["q4_k_m", "q8_0", "q5_k_m",],
-        token = "YOUR_HF_TOKEN",
+inputs = tokenizer(text, return_tensors="pt").to(model.device)
+with torch.no_grad():
+    outputs = model.generate(
+        **inputs,
+        max_new_tokens=1024,
+        temperature=0.8,
+        top_p=0.95,
+        do_sample=True,
     )
+output = tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+print(output)
 
-"""Now, use the `llama_finetune.Q8_0.gguf` file or `llama_finetune.Q4_K_M.gguf` file in llama.cpp.
+"""Save the SOARA adapter"""
 
-And we're done! If you have any questions on Unsloth, we have a [Discord](https://discord.gg/unsloth) channel! If you find any bugs or want to keep updated with the latest LLM stuff, or need help, join projects etc, feel free to join our Discord!
+model.save_pretrained("grpo_saved_soara")
+tokenizer.save_pretrained("grpo_saved_soara")
 
-Some other resources:
-1. Train your own reasoning model - Llama GRPO notebook [Free Colab](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Llama3.1_(8B)-GRPO.ipynb)
-2. Saving finetunes to Ollama. [Free notebook](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Llama3_(8B)-Ollama.ipynb)
-3. Llama 3.2 Vision finetuning - Radiography use case. [Free Colab](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Llama3.2_(11B)-Vision.ipynb)
-4. See notebooks for DPO, ORPO, Continued pretraining, conversational finetuning and more on our [documentation](https://unsloth.ai/docs/get-started/unsloth-notebooks)!
+"""### Saving to float16
 
-<div class="align-center">
-  <a href="https://unsloth.ai"><img src="https://github.com/unslothai/unsloth/raw/main/images/unsloth%20new%20logo.png" width="115"></a>
-  <a href="https://discord.gg/unsloth"><img src="https://github.com/unslothai/unsloth/raw/main/images/Discord.png" width="145"></a>
-  <a href="https://unsloth.ai/docs/"><img src="https://github.com/unslothai/unsloth/blob/main/images/documentation%20green%20button.png?raw=true" width="125"></a>
-
-  Join Discord if you need help + ⭐️ <i>Star us on <a href="https://github.com/unslothai/unsloth">Github</a> </i> ⭐️
-</div>
-
-  This notebook and all Unsloth notebooks are licensed [LGPL-3.0](https://github.com/unslothai/notebooks?tab=LGPL-3.0-1-ov-file#readme).
+Merge SOARA adapter into base model and save as float16.
 """
+
+# Merge and save to 16bit
+if True:
+    try:
+        model.merge_and_unload().save_pretrained("llama_soara_merged_16bit")
+        tokenizer.save_pretrained("llama_soara_merged_16bit")
+    except Exception as e:
+        print(f"Error merging model: {e}")
+
+"""### Evaluation on GSM8K
+"""
+print("\n" + "="*50)
+print("Starting Evaluation on GSM8K Test Set")
+print("="*50)
+
+from tqdm import tqdm
+
+# Load GSM8K test set
+gsm8k_test = get_gsm8k_questions(split="test")
+
+# Evaluation loop
+correct = 0
+total = 0
+extraction_stats = {"xml": 0, "gsm8k": 0, "boxed": 0, "numerical": 0, "none": 0}
+print(f"Evaluating on {len(gsm8k_test)} samples...")
+
+model.eval() # Set model to eval mode
+
+for i, example in tqdm(enumerate(gsm8k_test), total=len(gsm8k_test)):
+    # Prepare prompt
+    messages = example['prompt'] # Already has system prompt and user query
+    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    
+    inputs = tokenizer(text, return_tensors="pt").to(model.device)
+    
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=1024,
+            temperature=0.0, # Greedy decoding for eval
+            top_p=1.0,
+            do_sample=False,
+        )
+    
+    # Decode output
+    output_text = tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+    
+    # Extract prediction
+    pred_answer = ""
+    extraction_method = "none"
+    try:
+        pred_answer = extract_xml_answer(output_text)
+        if pred_answer:
+            extraction_method = "xml"
+    except:
+        pred_answer = ""
+    
+    # Fallback if XML extraction fails
+    if not pred_answer:
+        val, method = extract_answer(output_text)
+        if method != "none":
+            pred_answer = str(val)
+            extraction_method = method
+        else:
+            extraction_method = "none"
+            
+    # Update stats
+    extraction_stats[extraction_method] += 1
+        
+    # Get ground truth
+    gt_answer = example['answer'] # This is just the number string (e.g. "42")
+    
+    # Check correctness
+    if pred_answer == gt_answer:
+        correct += 1
+    total += 1
+    
+    # Optional: Print first few examples
+    if i < 5:
+        print(f"\nSample {i+1}:")
+        print(f"Question: {messages[1]['content']}")
+        print(f"GT: {gt_answer}")
+        print(f"Pred: {pred_answer} (method: {extraction_method})")
+        print(f"Output: {output_text[:100]}...") # Truncate for brevity
+        print(f"Correct: {pred_answer == gt_answer}")
+    
+    current_accuracy = correct / total
+    print(f"Step {i+1}/{len(gsm8k_test)} | Acc: {current_accuracy:.4f} ({correct}/{total}) | Method: {extraction_method}")
+
+accuracy = correct / total if total > 0 else 0
+print(f"\nFinal GSM8K Accuracy: {accuracy:.4f} ({correct}/{total})")
+
+print(f"\nExtraction Method Statistics:")
+for method, count in extraction_stats.items():
+    pct = count / total * 100 if total > 0 else 0
+    print(f"  {method}: {count} ({pct:.1f}%)")

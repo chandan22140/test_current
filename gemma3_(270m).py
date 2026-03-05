@@ -47,74 +47,53 @@ Visit our docs for all our [model uploads](https://unsloth.ai/docs/get-started/u
 # !pip install transformers==4.56.2
 # !pip install --no-deps trl==0.22.2
 
-"""### Unsloth
+"""### SOARA Setup
 
-`FastModel` supports loading nearly any model now! This includes Vision and Text models!
+`SOARA` adapter on Gemma-3 270M for chess instruction finetuning.
 """
 
-from unsloth import FastModel
+import sys
+sys.path.insert(0, "/home/chandan/test_current/peft/src")
+
 import torch
-max_seq_length = 2048
-fourbit_models = [
-    # 4bit dynamic quants for superior accuracy and low memory use
-    "unsloth/gemma-3-1b-it-unsloth-bnb-4bit",
-    "unsloth/gemma-3-4b-it-unsloth-bnb-4bit",
-    "unsloth/gemma-3-12b-it-unsloth-bnb-4bit",
-    "unsloth/gemma-3-27b-it-unsloth-bnb-4bit",
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import get_peft_model, SOARAConfig
 
-    # Other popular models!
-    "unsloth/Llama-3.1-8B",
-    "unsloth/Llama-3.2-3B",
-    "unsloth/Llama-3.3-70B",
-    "unsloth/mistral-7b-instruct-v0.3",
-    "unsloth/Phi-4",
-] # More models at https://huggingface.co/unsloth
+max_seq_length = 512
+soara_rank = 2  # SOARA rank
 
-model, tokenizer = FastModel.from_pretrained(
-    model_name = "unsloth/gemma-3-270m-it",
-    max_seq_length = max_seq_length, # Choose any for long context!
-    load_in_4bit = False,  # 4 bit quantization to reduce memory
-    load_in_8bit = False, # [NEW!] A bit more accurate, uses 2x memory
-    full_finetuning = False, # [NEW!] We have full finetuning now!
-    # token = "YOUR_HF_TOKEN", # HF Token for gated models
+model_name = "google/gemma-3-270m-it"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+tokenizer.padding_side = "right"
+
+model = AutoModelForCausalLM.from_pretrained(
+    model_name,
+    torch_dtype=torch.bfloat16,
+    device_map="auto",
 )
 
-"""We now add LoRA adapters so we only need to update a small amount of parameters!"""
+# Enable gradient checkpointing for memory efficiency
+model.gradient_checkpointing_enable()
 
-model = FastModel.get_peft_model(
-    model,
-    r = 128, # Choose any number > 0 ! Suggested 8, 16, 32, 64, 128
-    target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
-                      "gate_proj", "up_proj", "down_proj",],
-    lora_alpha = 128,
-    lora_dropout = 0, # Supports any, but = 0 is optimized
-    bias = "none",    # Supports any, but = "none" is optimized
-    # [NEW] "unsloth" uses 30% less VRAM, fits 2x larger batch sizes!
-    use_gradient_checkpointing = "unsloth", # True or "unsloth" for very long context
-    random_state = 3407,
-    use_rslora = False,  # We support rank stabilized LoRA
-    loftq_config = None, # And LoftQ
+# Apply SOARA adapter
+soara_config = SOARAConfig(
+    r=soara_rank,
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                    "gate_proj", "up_proj", "down_proj"],
+    method="v1",
+    orthogonality_reg_weight=1e-4,
+    soara_dropout=0.0,
+    s_dtype_fp32=True,
 )
+model = get_peft_model(model, soara_config)
+model.print_trainable_parameters()
 
 """<a name="Data"></a>
 ### Data Prep
-We now use the `Gemma-3` format for conversation style finetunes. We use [Thytu's ChessInstruct](https://huggingface.co/datasets/Thytu/ChessInstruct) dataset. Gemma-3 renders multi turn conversations like below:
-
-```
-<bos><start_of_turn>user
-Hello!<end_of_turn>
-<start_of_turn>model
-Hey there!<end_of_turn>
-```
-
-We use our `get_chat_template` function to get the correct chat template. We support `zephyr, chatml, mistral, llama, alpaca, vicuna, vicuna_old, phi3, llama3, phi4, qwen2.5, gemma3` and more.
+Using Gemma-3 chat template for conversation style finetunes with ChessInstruct dataset.
 """
-
-from unsloth.chat_templates import get_chat_template
-tokenizer = get_chat_template(
-    tokenizer,
-    chat_template = "gemma3",
-)
 
 from datasets import load_dataset
 dataset = load_dataset("Thytu/ChessInstruct", split = "train[:10000]")
@@ -151,51 +130,31 @@ dataset = dataset.map(formatting_prompts_func, batched = True)
 
 dataset[100]['text']
 
-"""<a name="Train"></a>
-### Train the model
-Now let's train our model. We do 100 steps to speed things up, but you can set `num_train_epochs=1` for a full run, and turn off `max_steps=None`.
+"""Let's train the model. We do 100 steps to speed things up, but set `num_train_epochs=1` for a full run.
 """
 
 from trl import SFTTrainer, SFTConfig
 trainer = SFTTrainer(
     model = model,
-    tokenizer = tokenizer,
+    processing_class = tokenizer,
     train_dataset = dataset,
-    eval_dataset = None, # Can set up evaluation!
+    eval_dataset = None,
     args = SFTConfig(
         dataset_text_field = "text",
-        per_device_train_batch_size = 4,
-        gradient_accumulation_steps = 1, # Use GA to mimic batch size!
+        per_device_train_batch_size = 1,
+        gradient_accumulation_steps = 4,
         warmup_steps = 5,
-        # num_train_epochs = 1, # Set this for 1 full training run.
         max_steps = 100,
-        learning_rate = 5e-5, # Reduce to 2e-5 for long training runs
+        learning_rate = 5e-5,
         logging_steps = 1,
         optim = "adamw_8bit",
         weight_decay = 0.001,
         lr_scheduler_type = "linear",
         seed = 3407,
         output_dir = "outputs",
-        report_to = "none", # Use TrackIO/WandB etc
+        report_to = "none",
     ),
 )
-
-"""We also use Unsloth's `train_on_completions` method to only train on the assistant outputs and ignore the loss on the user's inputs. This helps increase accuracy of finetunes!"""
-
-from unsloth.chat_templates import train_on_responses_only
-trainer = train_on_responses_only(
-    trainer,
-    instruction_part = "<start_of_turn>user\n",
-    response_part = "<start_of_turn>model\n",
-)
-
-"""Let's verify masking the instruction part is done! Let's print the 100th row again."""
-
-tokenizer.decode(trainer.train_dataset[100]["input_ids"])
-
-"""Now let's print the masked out example - you should see only the answer is present:"""
-
-tokenizer.decode([tokenizer.pad_token_id if x == -100 else x for x in trainer.train_dataset[100]["labels"]]).replace(tokenizer.pad_token, " ")
 
 # @title Show current memory stats
 gpu_stats = torch.cuda.get_device_properties(0)
@@ -246,90 +205,20 @@ _ = model.generate(
 )
 
 """<a name="Save"></a>
-### Saving, loading finetuned models
-To save the final model as LoRA adapters, either use Hugging Face's `push_to_hub` for an online save or `save_pretrained` for a local save.
-
-**[NOTE]** This ONLY saves the LoRA adapters, and not the full model. To save to 16bit or GGUF, scroll down!
+### Saving the SOARA adapter
 """
 
-model.save_pretrained("gemma_3_lora")  # Local saving
-tokenizer.save_pretrained("gemma_3_lora")
-# model.push_to_hub("your_name/gemma_3_lora", token = "YOUR_HF_TOKEN") # Online saving
-# tokenizer.push_to_hub("your_name/gemma_3_lora", token = "YOUR_HF_TOKEN") # Online saving
+model.save_pretrained("gemma_3_soara")
+tokenizer.save_pretrained("gemma_3_soara")
 
-"""Now if you want to load the LoRA adapters we just saved for inference, set `False` to `True`:"""
+"""### Saving merged model to float16"""
 
+# Merge and save to 16bit
 if False:
-    from unsloth import FastLanguageModel
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name = "gemma_3_lora", # YOUR MODEL YOU USED FOR TRAINING
-        max_seq_length = 2048,
-        load_in_4bit = False,
-    )
+    merged_model = model.merge_and_unload()
+    merged_model.save_pretrained("gemma_3_soara_merged_16bit")
+    tokenizer.save_pretrained("gemma_3_soara_merged_16bit")
 
-"""### Saving to float16 for VLLM
-
-We also support saving to `float16` directly. Select `merged_16bit` for float16 or `merged_4bit` for int4. We also allow `lora` adapters as a fallback. Use `push_to_hub_merged` to upload to your Hugging Face account! You can go to https://huggingface.co/settings/tokens for your personal tokens. See [our docs](https://unsloth.ai/docs/basics/inference-and-deployment) for more deployment options.
-"""
-
-# Merge to 16bit
-if False:
-    model.save_pretrained_merged("gemma_3_finetune_16bit", tokenizer, save_method = "merged_16bit")
-if False: # Pushing to HF Hub
-    model.push_to_hub_merged("HF_USERNAME/gemma_3_finetune_16bit", tokenizer, save_method = "merged_16bit", token = "YOUR_HF_TOKEN")
-
-# Merge to 4bit
-if False:
-    model.save_pretrained_merged("gemma_3_finetune_4bit", tokenizer, save_method = "merged_4bit",)
-if False: # Pushing to HF Hub
-    model.push_to_hub_merged("HF_USERNAME/gemma_3_finetune_4bit", tokenizer, save_method = "merged_4bit", token = "YOUR_HF_TOKEN")
-
-# Just LoRA adapters
-if False:
-    model.save_pretrained("gemma_3_lora")
-    tokenizer.save_pretrained("gemma_3_lora")
-if False: # Pushing to HF Hub
-    model.push_to_hub("HF_USERNAME/gemma_3_lora", token = "YOUR_HF_TOKEN")
-    tokenizer.push_to_hub("HF_USERNAME/gemma_3_lora", token = "YOUR_HF_TOKEN")
-
-"""### GGUF / llama.cpp Conversion
-To save to `GGUF` / `llama.cpp`, we support it natively now for all models! For now, you can convert easily to `Q8_0, F16 or BF16` precision. `Q4_K_M` for 4bit will come later!
-"""
-
-if False: # Change to True to save to GGUF
-    model.save_pretrained_gguf(
-        "gemma_3_finetune",
-        tokenizer,
-        quantization_method = "Q8_0", # For now only Q8_0, BF16, F16 supported
-    )
-
-"""Likewise, if you want to instead push to GGUF to your Hugging Face account, set `if False` to `if True` and add your Hugging Face token and upload location!"""
-
-if False: # Change to True to upload GGUF
-    model.push_to_hub_gguf(
-        "HF_ACCOUNT/gemma_3_finetune",
-        tokenizer,
-        quantization_method = "Q8_0", # Only Q8_0, BF16, F16 supported
-        token = "YOUR_HF_TOKEN",
-    )
-
-"""Now, use the `gemma-3-finetune.gguf` file or `gemma-3-finetune-Q4_K_M.gguf` file in llama.cpp.
-
-And we're done! If you have any questions on Unsloth, we have a [Discord](https://discord.gg/unsloth) channel! If you find any bugs or want to keep updated with the latest LLM stuff, or need help, join projects etc, feel free to join our Discord!
-
-Some other resources:
-1. Train your own reasoning model - Llama GRPO notebook [Free Colab](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Llama3.1_(8B)-GRPO.ipynb)
-2. Saving finetunes to Ollama. [Free notebook](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Llama3_(8B)-Ollama.ipynb)
-3. Llama 3.2 Vision finetuning - Radiography use case. [Free Colab](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Llama3.2_(11B)-Vision.ipynb)
-4. See notebooks for DPO, ORPO, Continued pretraining, conversational finetuning and more on our [documentation](https://unsloth.ai/docs/get-started/unsloth-notebooks)!
-
-<div class="align-center">
-  <a href="https://unsloth.ai"><img src="https://github.com/unslothai/unsloth/raw/main/images/unsloth%20new%20logo.png" width="115"></a>
-  <a href="https://discord.gg/unsloth"><img src="https://github.com/unslothai/unsloth/raw/main/images/Discord.png" width="145"></a>
-  <a href="https://unsloth.ai/docs/"><img src="https://github.com/unslothai/unsloth/blob/main/images/documentation%20green%20button.png?raw=true" width="125"></a>
-
-  Join Discord if you need help + ⭐️ <i>Star us on <a href="https://github.com/unslothai/unsloth">Github</a> </i> ⭐️
-</div>
-
-  This notebook and all Unsloth notebooks are licensed [LGPL-3.0](https://github.com/unslothai/notebooks?tab=LGPL-3.0-1-ov-file#readme).
-"""
+# To reload:
+# from peft import PeftModel
+# model = PeftModel.from_pretrained(base_model, "gemma_3_soara")

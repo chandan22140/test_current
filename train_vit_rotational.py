@@ -176,6 +176,9 @@ class TrainingConfig:
     train_head: bool = True                 # Keep classifier head trainable
     track_grad_norm: bool = False           # Whether to compute and log gradient norm
     
+    # PEFT integration
+    use_peft: bool = False                  # Use SOARA from PEFT library instead of local implementation
+    
     @property
     def num_classes(self) -> int:
         """Get number of classes based on dataset."""
@@ -908,8 +911,13 @@ class ViTRotationalTrainer:
         
         return device
     
-    def create_model(self, method: str) -> Tuple[nn.Module, Optional[SOARATrainer]]:
-        """Create ViT model with SOARA adaptation."""
+    def create_model(self, method: str):
+        """Create ViT model with SOARA adaptation.
+        
+        Returns:
+            (model, rotational_trainer_or_none): When use_peft=True, rotational_trainer is None
+            and the PEFT model itself exposes get_orthogonality_loss() and step_all_phases().
+        """
         
         # Load pre-trained ViT from HuggingFace with separate Q/K/V projections
         model = ViTForImageClassification.from_pretrained(
@@ -922,6 +930,77 @@ class ViTRotationalTrainer:
         print(f"Created {self.config.model_name} with {sum(p.numel() for p in model.parameters()):,} parameters")
         print(f"Note: Using HuggingFace model with separate query/key/value projections")
         
+        # =====================================================================
+        # PEFT-based SOARA path
+        # =====================================================================
+        if self.config.use_peft:
+            print("\n🔧 Using SOARA from PEFT library")
+            sys.path.insert(0, "/home/chandan/test_current/peft/src")
+            from peft import get_peft_model
+            from peft import SOARAConfig as PeftSOARAConfig
+
+            # Compute steps_per_phase for V2 if needed
+            import math
+            steps_per_phase = self.config.steps_per_phase
+            if method == "V2":
+                total_steps = len(self.train_loader) * self.config.epochs
+                if self.config.use_butterfly:
+                    r = self.config.soara_rank
+                    d_padded = 2 ** math.ceil(math.log2(r)) if r > 0 else 1
+                    num_phases_per_cycle = int(math.log2(d_padded))
+                else:
+                    if (self.config.soara_rank - 1) % 2 == 0:
+                        num_phases_per_cycle = self.config.soara_rank - 1
+                    else:
+                        num_phases_per_cycle = self.config.soara_rank
+                total_phases = num_phases_per_cycle * self.config.total_cycles
+                steps_per_phase = max(1, total_steps // total_phases)
+                print(f"V2 config: total_steps={total_steps}, cycles={self.config.total_cycles}, "
+                      f"phases_per_cycle={num_phases_per_cycle}, steps_per_phase={steps_per_phase}")
+
+            peft_config = PeftSOARAConfig(
+                r=self.config.soara_rank,
+                method=method,
+                target_modules=list(self.config.target_modules),
+                modules_to_save=["classifier"],  # Keep classifier head trainable
+                soara_dropout=self.config.lora_dropout,
+                orthogonality_reg_weight=self.config.orthogonality_weight,
+                regularization_type=self.config.regularization_type,
+                steps_per_phase=steps_per_phase,
+                total_cycles=self.config.total_cycles,
+                use_butterfly=self.config.use_butterfly,
+                butterfly_sequential=self.config.butterfly_sequential,
+                butterfly_block_size=self.config.butterfly_block_size,
+                low_rank_r=self.config.low_rank_r,
+                quantize_residual=self.config.quantize_residual,
+                quantize_base_components=self.config.quantize_base_components,
+            )
+            print(f"PEFT SOARAConfig: {peft_config}")
+
+            model = get_peft_model(model, peft_config)
+            model.print_trainable_parameters()
+
+            # Count parameters
+            total_params = sum(p.numel() for p in model.parameters())
+            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            print(f"Parameters: {trainable_params:,} trainable / {total_params:,} total ({trainable_params/total_params:.4f})")
+
+            # Profile VRAM usage
+            print(f"\n{'='*60}")
+            print("VRAM PROFILING AFTER MODEL CREATION (PEFT)")
+            print(f"{'='*60}")
+            memory_breakdown = profile_model_memory(model)
+            print_memory_report(memory_breakdown)
+
+            # Store steps_per_phase and method on config for use in _train_epoch
+            self._peft_steps_per_phase = steps_per_phase
+            self._peft_method = method
+
+            return model.to(self.device), None  # No local SOARATrainer needed
+
+        # =====================================================================
+        # Local SOARA path (original)
+        # =====================================================================
         # Configure SOARA
         if method == "v1":
             soara_config = SOARAConfig(
@@ -1087,19 +1166,26 @@ class ViTRotationalTrainer:
 
         # Setup optimizer with LoRA+ style LR (higher LR for S than R/thetas)
         # Separate parameters into groups: rotation params (R/thetas), S params, classifier head
+        # Works for both local SOARA (e.g. ".S", ".thetas") and PEFT SOARA (e.g. "soara_S", "soara_thetas")
         rotation_params = []  # R_U, R_V, thetas, B_U, B_V, C_U, C_V
         s_params = []
         head_params = []
         other_params = []
+        
+        # Patterns that identify rotation params (covers both local and PEFT naming)
+        rotation_patterns = ['.thetas', '.R_U', '.R_V', '.B_U', '.B_V', '.C_U', '.C_V',
+                             'soara_thetas', 'soara_R_U', 'soara_R_V', 'soara_B_U', 'soara_B_V', 'soara_C_U', 'soara_C_V']
+        # Patterns that identify S params
+        s_patterns = ['.S', 'soara_S']
         
         for name, param in model.named_parameters():
             if not param.requires_grad:
                 continue
             if 'classifier' in name or ('head' in name and 'encoder' not in name):
                 head_params.append(param)
-            elif '.S' in name or name.endswith('.S'):
+            elif any(p in name for p in s_patterns) and not any(p in name for p in rotation_patterns):
                 s_params.append(param)
-            elif any(p in name for p in ['.thetas', '.R_U', '.R_V', '.B_U', '.B_V', '.C_U', '.C_V']):
+            elif any(p in name for p in rotation_patterns):
                 rotation_params.append(param)
             else:
                 other_params.append(param)
@@ -1378,8 +1464,13 @@ class ViTRotationalTrainer:
             total_samples += target.size(0)
             
             # Add orthogonality regularization for V1 (SOARA-V1)
-            if rotational_trainer.config.method == "v1":
-                ortho_loss = rotational_trainer.get_orthogonality_loss()
+            # Works for both local SOARATrainer and PEFT model
+            current_method = self._peft_method if rotational_trainer is None else rotational_trainer.config.method
+            if current_method == "v1":
+                if rotational_trainer is not None:
+                    ortho_loss = rotational_trainer.get_orthogonality_loss()
+                else:
+                    ortho_loss = model.get_orthogonality_loss()
                 loss = loss + ortho_loss
                 
                 if batch_idx % 100 == 0 and self.config.use_wandb:
@@ -1392,8 +1483,15 @@ class ViTRotationalTrainer:
             if batch_idx < 3 and epoch == 0:
                 print(f"\n  [DEBUG] Batch {batch_idx} gradient check:")
                 # Check classifier gradients
+                classifier_module = None
                 if hasattr(model, 'classifier'):
-                    for name, param in model.classifier.named_parameters():
+                    classifier_module = model.classifier
+                elif hasattr(model, 'base_model') and hasattr(model.base_model, 'model') and hasattr(model.base_model.model, 'classifier'):
+                    # PEFT wraps: model.base_model.model.classifier
+                    classifier_module = model.base_model.model.classifier
+                
+                if classifier_module is not None:
+                    for name, param in classifier_module.named_parameters():
                         if param.grad is not None:
                             grad_norm_val = param.grad.norm().item()
                             print(f"    classifier.{name}: grad_norm={grad_norm_val:.6f}, requires_grad={param.requires_grad}")
@@ -1401,8 +1499,9 @@ class ViTRotationalTrainer:
                             print(f"    classifier.{name}: grad=None, requires_grad={param.requires_grad}")
                 
                 # Check a sample rotational adapter
+                adapter_type_name = 'SOARALinear' if self.config.use_peft else 'SOARALinearLayer'
                 for name, module in model.named_modules():
-                    if 'SOARALinearLayer' in type(module).__name__:
+                    if adapter_type_name in type(module).__name__:
                         for pname, param in module.named_parameters():
                             if param.requires_grad and param.grad is not None:
                                 print(f"    {name}.{pname}: grad_norm={param.grad.norm().item():.6f}")
@@ -1414,28 +1513,33 @@ class ViTRotationalTrainer:
             optimizer.step()
             
             # SOARA phase transition (V2 (SOARA-V2) only)
-            if rotational_trainer.config.method == "V2" and rotational_trainer.should_step_phase(global_step):
-                print(f"  Step {global_step}: Advancing rotation phase")
-                params_before, params_after = rotational_trainer.step_phase()
-                
-                if self.config.use_wandb:
-                    adapter = rotational_trainer.adapters[0]
-                    log_dict = {}
-                    
-                    # Add rotation layer tracking
-                    if hasattr(adapter, 'current_layer_index'):
-                        log_dict["rotation_layer_index"] = adapter.current_layer_index
-                        log_dict["rotation_cycle"] = adapter.current_cycle
-                    
-                    # Add parameter count tracking for V2
-                    if params_before > 0:
-                        log_dict["V2/trainable_params_before"] = params_before
-                        log_dict["V2/trainable_params_after"] = params_after
-                        log_dict["V2/params_delta"] = params_after - params_before
-                        print(f"    Parameters: {params_before} → {params_after} (Δ = {params_after - params_before})")
-                    
-                    if log_dict:
-                        wandb.log(log_dict, step=global_step)
+            if current_method == "V2":
+                if rotational_trainer is not None:
+                    # Local SOARA path
+                    if rotational_trainer.should_step_phase(global_step):
+                        print(f"  Step {global_step}: Advancing rotation phase")
+                        params_before, params_after = rotational_trainer.step_phase()
+                        
+                        if self.config.use_wandb:
+                            adapter = rotational_trainer.adapters[0]
+                            log_dict = {}
+                            if hasattr(adapter, 'current_layer_index'):
+                                log_dict["rotation_layer_index"] = adapter.current_layer_index
+                                log_dict["rotation_cycle"] = adapter.current_cycle
+                            if params_before > 0:
+                                log_dict["V2/trainable_params_before"] = params_before
+                                log_dict["V2/trainable_params_after"] = params_after
+                                log_dict["V2/params_delta"] = params_after - params_before
+                                print(f"    Parameters: {params_before} → {params_after} (Δ = {params_after - params_before})")
+                            if log_dict:
+                                wandb.log(log_dict, step=global_step)
+                else:
+                    # PEFT path: manual step tracking
+                    if global_step > 0 and global_step % self._peft_steps_per_phase == 0:
+                        print(f"  Step {global_step}: Advancing rotation phase (PEFT)")
+                        phase_results = model.step_all_phases()
+                        if self.config.use_wandb and phase_results:
+                            wandb.log({"V2/phase_stepped_modules": len(phase_results)}, step=global_step)
             
             # Logging
             if self.config.use_wandb and global_step % 100 == 0:
@@ -1818,6 +1922,8 @@ def main():
                        help="Compute normalization mean/std from training data instead of using ImageNet defaults")
     parser.add_argument("--seed", type=int, default=42,
                        help="Random seed for reproducibility (default: 42)")
+    parser.add_argument("--use-peft", action="store_true",
+                       help="Use SOARA from PEFT library (sys.path.insert) instead of local implementation")
     
     args = parser.parse_args()
     
@@ -1865,7 +1971,8 @@ def main():
         device=args.device,
         k_shot=args.k_shot,
         use_dataset_stats=args.use_dataset_stats,
-        seed=args.seed
+        seed=args.seed,
+        use_peft=args.use_peft
     )
     print("config.use_wandb", train_config.use_wandb)
     print("args.sweep", args.sweep)

@@ -26,4 +26,7 @@ telegram_bot/
 
 # Additional ignored directories
 logs/
-grpo_trainer_lora_model/
+grpo_*/
+gemma_*/
+llama_*/
+A2/

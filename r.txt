@@ -8,7 +8,8 @@ wandb==0.24.2
 scikit-learn==1.7.2
 matplotlib==3.10.8
 seaborn==0.13.2
-vllm==0.12.0
+vllm
 accelerate==1.12.0
 fire==0.7.1
 tensorboard==2.20.0
+
